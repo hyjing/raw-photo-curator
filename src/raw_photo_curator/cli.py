@@ -24,7 +24,8 @@ def analyze(folder: Path, output: Path, limit: int | None = None) -> list[Result
             image.save(thumbs / thumb_name, "JPEG", quality=84, optimize=True)
             results.append(Result(path, keep, edit, metrics, explain(metrics), f"thumbnails/{thumb_name}"))
             print(f"[{number}/{len(paths)}] {path.name}: 保留 {keep:.0f} / 调色 {edit:.0f}")
-        except Exception as exc:
+        # A damaged/unsupported file should not abort a long folder scan.
+        except Exception as exc:  # noqa: BLE001
             print(f"跳过 {path}: {exc}", file=sys.stderr)
     return sorted(results, key=lambda item: item.keep_score, reverse=True)
 
@@ -46,4 +47,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
