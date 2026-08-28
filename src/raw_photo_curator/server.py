@@ -170,21 +170,25 @@ aside{padding:20px;overflow:auto;border-left:1px solid #292b30}h1{font-size:18px
 <div class="hint">快捷键：P 保留 · E 调色 · M 待定 · X 淘汰 · 1–5 星 · ←/→ 切换<br>客观分来自预览像素的清晰度、曝光、高光、阴影、色彩与画面区域信息。</div></aside></div>
 <script>
 let photos=[], index=0, timer; const labels={sharpness:'清晰度',exposure:'曝光',highlights:'高光保留',shadows:'阴影保留',color:'色彩信息',composition:'构图代理'};
+const photoEl=document.getElementById('photo'), nameEl=document.getElementById('name'), pathEl=document.getElementById('path');
+const keepEl=document.getElementById('keep'), editEl=document.getElementById('edit'), positionEl=document.getElementById('position');
+const metricsEl=document.getElementById('metrics'), starsEl=document.getElementById('stars'), tagsEl=document.getElementById('tags');
+const noteEl=document.getElementById('note'), summaryEl=document.getElementById('summary');
 const tagNames=['构图','光线','清晰度','表情','色彩','景深'];
 async function load(){const r=await fetch('/api/photos');const d=await r.json();photos=d.photos;showSummary(d.summary);render()}
 function current(){return photos[index]} function fb(){return current().feedback ||= {choice:null,rating:null,tags:[],note:''}}
-function render(){const p=current();if(!p)return;photo.src=p.thumbnail;name.textContent=p.path.split('/').pop();path.textContent=p.path;keep.textContent=p.keep_score;edit.textContent=p.edit_score;position.textContent=`${index+1} / ${photos.length}`;
- metrics.innerHTML=Object.entries(p.metrics).map(([k,v])=>`<div class="metric"><span>${labels[k]}</span><b>${v}</b></div>`).join('');
- document.querySelectorAll('[data-choice]').forEach(b=>b.classList.toggle('active',b.dataset.choice===fb().choice));stars.innerHTML=[1,2,3,4,5].map(n=>`<button data-rating="${n}" class="${fb().rating>=n?'active':''}">★</button>`).join('');
- tags.innerHTML=tagNames.map(t=>`<button data-tag="${t}" class="${fb().tags.includes(t)?'active':''}">${t}</button>`).join('');note.value=fb().note||''}
+function render(){const p=current();if(!p)return;photoEl.src=p.thumbnail;nameEl.textContent=p.path.split('/').pop();pathEl.textContent=p.path;keepEl.textContent=p.keep_score;editEl.textContent=p.edit_score;positionEl.textContent=`${index+1} / ${photos.length}`;
+ metricsEl.innerHTML=Object.entries(p.metrics).map(([k,v])=>`<div class="metric"><span>${labels[k]}</span><b>${v}</b></div>`).join('');
+ document.querySelectorAll('[data-choice]').forEach(b=>b.classList.toggle('active',b.dataset.choice===fb().choice));starsEl.innerHTML=[1,2,3,4,5].map(n=>`<button data-rating="${n}" class="${fb().rating>=n?'active':''}">★</button>`).join('');
+ tagsEl.innerHTML=tagNames.map(t=>`<button data-tag="${t}" class="${fb().tags.includes(t)?'active':''}">${t}</button>`).join('');noteEl.value=fb().note||''}
 async function save(){const p=current(), f=fb();const r=await fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:p.id,...f})});const d=await r.json();if(d.ok)showSummary(d.summary)}
-function showSummary(s){summary.textContent=`已评 ${s.reviewed} · 保留 ${s.keep} · 调色 ${s.edit} · 待定 ${s.maybe} · 淘汰 ${s.reject}`}
+function showSummary(s){summaryEl.textContent=`已评 ${s.reviewed} · 保留 ${s.keep} · 调色 ${s.edit} · 待定 ${s.maybe} · 淘汰 ${s.reject}`}
 function choose(c){fb().choice=fb().choice===c?null:c;render();save()} function move(n){index=Math.max(0,Math.min(photos.length-1,index+n));render()}
 document.querySelector('.choices').onclick=e=>{if(e.target.dataset.choice)choose(e.target.dataset.choice)};
-stars.onclick=e=>{if(e.target.dataset.rating){fb().rating=Number(e.target.dataset.rating);render();save()}};
-tags.onclick=e=>{const t=e.target.dataset.tag;if(t){fb().tags=fb().tags.includes(t)?fb().tags.filter(x=>x!==t):[...fb().tags,t];render();save()}};
-note.oninput=()=>{fb().note=note.value;clearTimeout(timer);timer=setTimeout(save,350)};
+starsEl.onclick=e=>{if(e.target.dataset.rating){fb().rating=Number(e.target.dataset.rating);render();save()}};
+tagsEl.onclick=e=>{const t=e.target.dataset.tag;if(t){fb().tags=fb().tags.includes(t)?fb().tags.filter(x=>x!==t):[...fb().tags,t];render();save()}};
+noteEl.oninput=()=>{fb().note=noteEl.value;clearTimeout(timer);timer=setTimeout(save,350)};
 document.getElementById('prev').onclick=()=>move(-1);
 document.getElementById('next').onclick=()=>move(1);
-document.onkeydown=e=>{if(e.target===note)return;if(e.key==='ArrowRight')move(1);if(e.key==='ArrowLeft')move(-1);if('pPeEmMxX'.includes(e.key))choose(({p:'keep',e:'edit',m:'maybe',x:'reject'})[e.key.toLowerCase()]);if(/[1-5]/.test(e.key)){fb().rating=Number(e.key);render();save()}};load();
+document.onkeydown=e=>{if(e.target===noteEl)return;if(e.key==='ArrowRight')move(1);if(e.key==='ArrowLeft')move(-1);if('pPeEmMxX'.includes(e.key))choose(({p:'keep',e:'edit',m:'maybe',x:'reject'})[e.key.toLowerCase()]);if(/[1-5]/.test(e.key)){fb().rating=Number(e.key);render();save()}};load();
 </script></html>"""
