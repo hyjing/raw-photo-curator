@@ -18,6 +18,7 @@ def analyze(
     offset: int = 0,
     progress: Callable[[int, int], None] | None = None,
     stats: Callable[[dict[str, int]], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[Result]:
     paths = discover(folder)
     if limit is not None:
@@ -27,11 +28,15 @@ def analyze(
     thumbs = output / "thumbnails"
     thumbs.mkdir(parents=True, exist_ok=True)
     results: list[Result] = []
-    run_stats = {"hits": 0, "misses": 0, "failed": 0}
+    run_stats = {"hits": 0, "misses": 0, "failed": 0, "deleted": 0, "cancelled": 0}
     if progress:
         progress(0, len(paths))
     with Catalog(output / "catalog.sqlite3") as catalog:
+        run_stats["deleted"] = catalog.prune_missing()
         for number, path in enumerate(paths, start=1):
+            if cancelled and cancelled():
+                run_stats["cancelled"] = 1
+                break
             try:
                 cached = catalog.cached(path, output)
                 if cached:

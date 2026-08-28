@@ -36,6 +36,7 @@ class Catalog:
         self.path = path
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.executescript(
             """
@@ -64,6 +65,16 @@ class Catalog:
             PRAGMA user_version = 1;
             """
         )
+
+    def prune_missing(self) -> int:
+        rows = self.connection.execute("SELECT id, path FROM photos").fetchall()
+        missing = [(row["id"],) for row in rows if not Path(row["path"]).is_file()]
+        with self.connection:
+            self.connection.executemany(
+                "DELETE FROM analysis_cache WHERE photo_id = ?", missing
+            )
+            self.connection.executemany("DELETE FROM photos WHERE id = ?", missing)
+        return len(missing)
 
     def close(self) -> None:
         self.connection.close()

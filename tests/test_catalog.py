@@ -15,18 +15,24 @@ def test_analysis_cache_hits_and_invalidates_changed_file(tmp_path: Path):
 
     first_stats: list[dict[str, int]] = []
     analyze(photos, output, stats=first_stats.append)
-    assert first_stats == [{"hits": 0, "misses": 1, "failed": 0}]
+    assert first_stats == [
+        {"hits": 0, "misses": 1, "failed": 0, "deleted": 0, "cancelled": 0}
+    ]
 
     warm_stats: list[dict[str, int]] = []
     analyze(photos, output, stats=warm_stats.append)
-    assert warm_stats == [{"hits": 1, "misses": 0, "failed": 0}]
+    assert warm_stats == [
+        {"hits": 1, "misses": 0, "failed": 0, "deleted": 0, "cancelled": 0}
+    ]
 
     Image.new("RGB", (48, 32), (180, 40, 20)).save(source)
     stat = source.stat()
     os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
     changed_stats: list[dict[str, int]] = []
     analyze(photos, output, stats=changed_stats.append)
-    assert changed_stats == [{"hits": 0, "misses": 1, "failed": 0}]
+    assert changed_stats == [
+        {"hits": 0, "misses": 1, "failed": 0, "deleted": 0, "cancelled": 0}
+    ]
 
 
 def test_missing_thumbnail_forces_regeneration(tmp_path: Path):
@@ -39,5 +45,7 @@ def test_missing_thumbnail_forces_regeneration(tmp_path: Path):
 
     stats: list[dict[str, int]] = []
     analyze(photos, output, stats=stats.append)
-    assert stats == [{"hits": 0, "misses": 1, "failed": 0}]
+    assert stats == [
+        {"hits": 0, "misses": 1, "failed": 0, "deleted": 0, "cancelled": 0}
+    ]
     assert (output / result.thumbnail).is_file()
