@@ -21,6 +21,10 @@ class SessionState:
     folder: Path
     limit: int
     analyzer: object
+    progress_current: int = 0
+    progress_total: int = 0
+    progress_running: bool = False
+    progress_stage: str = "idle"
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -100,6 +104,13 @@ def make_handler(state: SessionState, database: Path):
                     "photos": _photo_payload(state.results, database),
                     "summary": _summary(database, state.results),
                     "folder": str(state.folder),
+                })
+            elif route == "/api/progress":
+                self._json({
+                    "current": state.progress_current,
+                    "total": state.progress_total,
+                    "running": state.progress_running,
+                    "stage": state.progress_stage,
                 })
             elif route.startswith("/thumbnails/"):
                 name = Path(route).name
@@ -190,22 +201,36 @@ def make_handler(state: SessionState, database: Path):
             self._json({"ok": True, "added": len(additions), "count": len(state.results)})
 
         def _build_recommendations(self) -> None:
-            all_results = state.analyzer(state.folder, state.output, None, 0)
-            feedback = _read_feedback(database)
-            scores = recommendation_scores(all_results, feedback)
-            reviewed_paths = set(feedback)
-            state.results = sorted(
-                all_results,
-                key=lambda result: (
-                    str(result.path) in reviewed_paths,
-                    -scores[str(result.path)],
-                ),
-            )
-            self._json({
-                "ok": True,
-                "count": len(state.results),
-                "feedback_count": len(feedback),
-            })
+            state.progress_running = True
+            state.progress_stage = "scanning"
+
+            def update_progress(current: int, total: int) -> None:
+                state.progress_current = current
+                state.progress_total = total
+
+            try:
+                all_results = state.analyzer(
+                    state.folder, state.output, None, 0, update_progress
+                )
+                state.progress_stage = "ranking"
+                feedback = _read_feedback(database)
+                scores = recommendation_scores(all_results, feedback)
+                reviewed_paths = set(feedback)
+                state.results = sorted(
+                    all_results,
+                    key=lambda result: (
+                        str(result.path) in reviewed_paths,
+                        -scores[str(result.path)],
+                    ),
+                )
+                self._json({
+                    "ok": True,
+                    "count": len(state.results),
+                    "feedback_count": len(feedback),
+                })
+            finally:
+                state.progress_running = False
+                state.progress_stage = "done"
 
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -237,6 +262,7 @@ APP_HTML = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 header{min-height:58px;display:flex;align-items:center;gap:12px;padding:9px 24px;border-bottom:1px solid #292b30}
 header b{font-size:17px}#summary{color:#a6a8ad}.layout{height:calc(100vh - 58px);display:grid;grid-template-columns:minmax(0,1fr) 340px}
 #folder{min-width:280px;flex:1;background:#17191d;color:#eee;border:1px solid #3b3e44;border-radius:8px;padding:8px}#folderStatus{font-size:12px;color:#8e929a}
+#scanProgress{width:150px;accent-color:#55c987}#scanProgress[hidden]{display:none}
 .stage{display:flex;align-items:center;justify-content:center;padding:24px;background:#08090a;overflow:hidden}.stage img{max-width:100%;max-height:100%;object-fit:contain}
 aside{padding:20px;overflow:auto;border-left:1px solid #292b30}h1{font-size:18px;margin:0 0 6px;overflow-wrap:anywhere}.path{font-size:12px;color:#777;overflow-wrap:anywhere}
 .scores{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:18px 0}.score{padding:13px;border-radius:10px;background:#1b1d21}.score strong{display:block;font-size:26px}.keep strong{color:#64dc90}.edit strong{color:#6dbaff}
@@ -245,7 +271,7 @@ aside{padding:20px;overflow:auto;border-left:1px solid #292b30}h1{font-size:18px
 .tags button{font-size:12px;padding:6px 8px}textarea{width:100%;background:#15171a;color:#eee;border:1px solid #3b3e44;border-radius:8px;padding:9px;resize:vertical}.nav{display:flex;justify-content:space-between;margin-top:16px}.hint{color:#73767d;font-size:12px;line-height:1.6;margin-top:16px}
 @media(max-width:800px){.layout{height:auto;grid-template-columns:1fr}.stage{height:55vh}aside{border-left:0}.path{display:none}}
 </style>
-<header><b>RAW Photo Curator</b><input id="folder" aria-label="本地照片文件夹"><button id="loadFolder">加载前 5 张</button><button id="recommend">生成推荐榜</button><span id="folderStatus"></span><span id="position"></span><span id="summary">载入中…</span></header>
+<header><b>RAW Photo Curator</b><input id="folder" aria-label="本地照片文件夹"><button id="loadFolder">加载前 5 张</button><button id="recommend">生成推荐榜</button><progress id="scanProgress" value="0" max="100" hidden></progress><span id="folderStatus"></span><span id="position"></span><span id="summary">载入中…</span></header>
 <div class="layout"><div class="stage"><img id="photo"></div><aside><h1 id="name"></h1><div class="path" id="path"></div>
 <div class="scores"><div class="score keep">客观保留分<strong id="keep"></strong></div><div class="score edit">个人推荐分<strong id="recommendScore"></strong></div><div class="score edit">调色潜力<strong id="edit"></strong></div></div>
 <div class="metrics" id="metrics"></div><div class="choices"><button data-choice="keep">P 保留</button><button class="edit" data-choice="edit">E 调色</button><button data-choice="maybe">M 待定</button><button class="reject" data-choice="reject">X 淘汰</button></div>
@@ -276,6 +302,6 @@ noteEl.oninput=()=>{fb().note=noteEl.value;clearTimeout(timer);timer=setTimeout(
 document.getElementById('prev').onclick=()=>move(-1);
 document.getElementById('next').onclick=moveNext;
 document.getElementById('loadFolder').onclick=async()=>{const status=document.getElementById('folderStatus');status.textContent='正在分析…';const r=await fetch('/api/folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:document.getElementById('folder').value})});const d=await r.json();status.textContent=d.ok?`已加载 ${d.count} 张`:d.error;if(d.ok)await load()};
-document.getElementById('recommend').onclick=async()=>{const status=document.getElementById('folderStatus');status.textContent='正在分析全部照片并生成推荐…';const r=await fetch('/api/recommendations',{method:'POST'});const d=await r.json();if(d.ok){await load();status.textContent=`推荐榜已生成：${d.count} 张，基于 ${d.feedback_count} 条反馈`}else status.textContent='推荐生成失败'};
+document.getElementById('recommend').onclick=async()=>{const status=document.getElementById('folderStatus'),bar=document.getElementById('scanProgress'),button=document.getElementById('recommend');status.textContent='正在分析全部照片…';bar.hidden=false;bar.value=0;button.disabled=true;const poll=setInterval(async()=>{const p=await (await fetch('/api/progress')).json();if(p.total){bar.value=p.current/p.total*100;status.textContent=p.stage==='ranking'?'正在更新个人推荐排序…':`正在分析 ${p.current} / ${p.total}（${Math.round(p.current/p.total*100)}%）`}},500);try{const r=await fetch('/api/recommendations',{method:'POST'});const d=await r.json();if(d.ok){await load();status.textContent=`推荐榜已生成：${d.count} 张，基于 ${d.feedback_count} 条反馈`}else status.textContent='推荐生成失败'}finally{clearInterval(poll);bar.value=100;setTimeout(()=>bar.hidden=true,1200);button.disabled=false}};
 document.onkeydown=e=>{if(e.target===noteEl||e.target.id==='folder')return;if(e.key==='ArrowRight')moveNext();if(e.key==='ArrowLeft')move(-1);if('pPeEmMxX'.includes(e.key))choose(({p:'keep',e:'edit',m:'maybe',x:'reject'})[e.key.toLowerCase()])};load();
 </script></html>"""

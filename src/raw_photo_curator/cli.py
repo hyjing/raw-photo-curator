@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from .image_io import as_array, discover, load_preview
@@ -10,7 +11,13 @@ from .scoring import explain, measure, scores
 from .server import serve
 
 
-def analyze(folder: Path, output: Path, limit: int | None = None, offset: int = 0) -> list[Result]:
+def analyze(
+    folder: Path,
+    output: Path,
+    limit: int | None = None,
+    offset: int = 0,
+    progress: Callable[[int, int], None] | None = None,
+) -> list[Result]:
     paths = discover(folder)
     if limit is not None:
         paths = paths[offset : offset + limit]
@@ -19,6 +26,8 @@ def analyze(folder: Path, output: Path, limit: int | None = None, offset: int = 
     thumbs = output / "thumbnails"
     thumbs.mkdir(parents=True, exist_ok=True)
     results: list[Result] = []
+    if progress:
+        progress(0, len(paths))
     for number, path in enumerate(paths, start=1):
         try:
             image = load_preview(path)
@@ -32,6 +41,9 @@ def analyze(folder: Path, output: Path, limit: int | None = None, offset: int = 
         # A damaged/unsupported file should not abort a long folder scan.
         except Exception as exc:  # noqa: BLE001
             print(f"跳过 {path}: {exc}", file=sys.stderr)
+        finally:
+            if progress:
+                progress(number, len(paths))
     return sorted(results, key=lambda item: item.keep_score, reverse=True)
 
 
