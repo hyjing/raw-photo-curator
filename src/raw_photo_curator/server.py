@@ -183,6 +183,8 @@ function choose(c){fb().choice=fb().choice===c?null:c;render();save()} function 
 document.querySelector('.choices').onclick=e=>{if(e.target.dataset.choice)choose(e.target.dataset.choice)};
 stars.onclick=e=>{if(e.target.dataset.rating){fb().rating=Number(e.target.dataset.rating);render();save()}};
 tags.onclick=e=>{const t=e.target.dataset.tag;if(t){fb().tags=fb().tags.includes(t)?fb().tags.filter(x=>x!==t):[...fb().tags,t];render();save()}};
-note.oninput=()=>{fb().note=note.value;clearTimeout(timer);timer=setTimeout(save,350)};prev.onclick=()=>move(-1);next.onclick=()=>move(1);
+note.oninput=()=>{fb().note=note.value;clearTimeout(timer);timer=setTimeout(save,350)};
+document.getElementById('prev').onclick=()=>move(-1);
+document.getElementById('next').onclick=()=>move(1);
 document.onkeydown=e=>{if(e.target===note)return;if(e.key==='ArrowRight')move(1);if(e.key==='ArrowLeft')move(-1);if('pPeEmMxX'.includes(e.key))choose(({p:'keep',e:'edit',m:'maybe',x:'reject'})[e.key.toLowerCase()]);if(/[1-5]/.test(e.key)){fb().rating=Number(e.key);render();save()}};load();
 </script></html>"""
