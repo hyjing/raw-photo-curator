@@ -12,8 +12,10 @@ from urllib.parse import parse_qs, urlparse
 
 from PIL import Image
 
+from .active_selection import select_active_candidates
 from .catalog import Catalog
 from .models import Result
+from .personal_evaluation import evaluate_personalization
 from .plugins import default_registry
 from .profiles import BUILTIN_PROFILES, METRIC_IDS, Profile, hard_rule_reasons, weighted_score
 from .ranker import PreferenceModel, contributions, learned_weight, predict, train_pairwise
@@ -129,6 +131,9 @@ def _connect(path: Path) -> sqlite3.Connection:
     connection.execute(
         "INSERT OR IGNORE INTO app_settings(key, value) VALUES ('active_profile', 'travel')"
     )
+    connection.execute(
+        "INSERT OR IGNORE INTO app_settings(key, value) VALUES ('anonymous_statistics', 'off')"
+    )
     migrated = connection.execute(
         "SELECT value FROM app_settings WHERE key = 'profile_feedback_migrated'"
     ).fetchone()
@@ -229,7 +234,10 @@ def _train_model(
 
 def _ranking(
     results: list[Result], database: Path, profile: Profile, catalog_path: Path
-) -> tuple[dict[str, float], dict[str, float], PreferenceModel | None, dict[str, dict]]:
+) -> tuple[
+    dict[str, float], dict[str, float], PreferenceModel | None,
+    dict[str, dict], dict[str, float] | None,
+]:
     feedback = _read_feedback(database, profile.id)
     priors = _profile_priors(results, profile, catalog_path)
     model = _load_model(database, profile.id)
@@ -241,7 +249,7 @@ def _ranking(
     scores = recommendation_scores(
         results, feedback, priors, learned, learned_weight(model)
     )
-    return scores, priors, model, contexts
+    return scores, priors, model, contexts, learned
 
 
 def _photo_payload(results: list[Result], database: Path) -> list[dict]:
@@ -285,7 +293,7 @@ def _read_feedback(database: Path, profile_id: str | None = None) -> dict[str, d
 def _refresh_candidates(state: SessionState, database: Path) -> None:
     profile = _active_profile(database)
     feedback = _read_feedback(database, profile.id)
-    scores, _, _, _ = _ranking(
+    scores, _, _, contexts, learned = _ranking(
         state.results, database, profile, state.output / "catalog.sqlite3"
     )
     current = set(state.candidate_paths or [])
@@ -302,18 +310,16 @@ def _refresh_candidates(state: SessionState, database: Path) -> None:
         active_unreviewed = []
         state.round_number += 1
     excluded = set(feedback) | current
-    available = sorted(
-        (
-            result
-            for result in state.results
-            if str(result.path) not in excluded and not hard_rule_reasons(result, profile)
-        ),
-        key=lambda result: scores[str(result.path)],
-        reverse=True,
-    )
+    available = [
+        result for result in state.results
+        if str(result.path) not in excluded and not hard_rule_reasons(result, profile)
+    ]
     retained = kept_current + active_unreviewed
     needed = 5 - len(retained)
-    state.candidate_paths = retained + [str(result.path) for result in available[:needed]]
+    selected = select_active_candidates(
+        available, scores, learned, contexts, needed
+    )
+    state.candidate_paths = retained + [str(result.path) for result in selected]
 
 
 def _candidate_payload(state: SessionState, database: Path) -> list[dict]:
@@ -321,7 +327,7 @@ def _candidate_payload(state: SessionState, database: Path) -> list[dict]:
         rotations = {row["path"]: row["degrees"] for row in connection.execute("SELECT * FROM rotations")}
     profile = _active_profile(database)
     feedback = _read_feedback(database, profile.id)
-    scores, priors, model, contexts = _ranking(
+    scores, priors, model, contexts, _ = _ranking(
         state.results, database, profile, state.output / "catalog.sqlite3"
     )
     by_path = {str(result.path): result for result in state.results}
@@ -458,6 +464,16 @@ def make_handler(state: SessionState, database: Path):
                     "learned_weight": learned_weight(model),
                     "model": json.loads(model.to_json()) if model else None,
                 })
+            elif route == "/api/evaluation":
+                profile = _active_profile(database)
+                feedback = _read_feedback(database, profile.id)
+                contexts = _preference_contexts(state.output / "catalog.sqlite3")
+                priors = _profile_priors(
+                    state.results, profile, state.output / "catalog.sqlite3"
+                )
+                self._json(evaluate_personalization(
+                    state.results, feedback, contexts, priors, profile.id
+                ))
             elif route.startswith("/thumbnails/"):
                 name = Path(route).name
                 candidate = state.output / "thumbnails" / name
@@ -698,7 +714,7 @@ def make_handler(state: SessionState, database: Path):
                 state.progress_stage = "ranking"
                 profile = _active_profile(database)
                 feedback = _read_feedback(database, profile.id)
-                scores, _, _, _ = _ranking(
+                scores, _, _, _, _ = _ranking(
                     all_results, database, profile, state.output / "catalog.sqlite3"
                 )
                 reviewed_paths = set(feedback)
@@ -1007,7 +1023,7 @@ async function loadGroups(){const d=await(await fetch('/api/groups')).json();gro
 document.getElementById('groupsButton').onclick=loadGroups;document.getElementById('closeGroups').onclick=()=>groupPanel.classList.remove('open');document.getElementById('groupZoom').oninput=e=>groupPanel.style.setProperty('--group-zoom',e.target.value);
 groupList.onclick=async e=>{if(e.target.dataset.groupDecision){await fetch('/api/group-feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group_id:e.target.dataset.feedbackGroup,photo_id:e.target.dataset.photo,decision:e.target.dataset.groupDecision,reason_criteria:['group_comparison']})});await loadGroups();return}const id=e.target.dataset.split;if(!id)return;const article=e.target.closest('[data-group]'),selected=[...article.querySelectorAll('[data-member]:checked')].map(x=>x.dataset.member),all=[...article.querySelectorAll('[data-member]')].map(x=>x.dataset.member),rest=all.filter(x=>!selected.includes(x));if(!selected.length||!rest.length){statusEl.textContent='请勾选要拆出的照片';return}await fetch('/api/groups/correct',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_group_ids:[id],partitions:[selected,rest],type:'related'})});await loadGroups()};
 document.getElementById('mergeGroups').onclick=async()=>{const selected=[...groupList.querySelectorAll('[data-select-group]:checked')].map(x=>x.closest('[data-group]').dataset.group);if(selected.length<2){statusEl.textContent='请至少选择两个组';return}const members=groupsData.filter(g=>selected.includes(g.id)).flatMap(g=>g.members.map(m=>m.id));await fetch('/api/groups/correct',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_group_ids:selected,partitions:[members],type:'related'})});await loadGroups()};
-async function loadPlugins(){const [d,pd,md]=await Promise.all([fetch('/api/plugins').then(r=>r.json()),fetch('/api/profiles').then(r=>r.json()),fetch('/api/model').then(r=>r.json())]);pluginList.innerHTML=d.plugins.map(p=>`<label class="plugin-card"><input type="checkbox" data-plugin="${p.id}" ${p.enabled?'checked':''} ${p.id==='builtin.objective'||p.availability!=='ready'?'disabled':''}><div><strong>${escapeHTML(p.name)}</strong><p>${escapeHTML(p.description)}</p><div class="plugin-meta"><span>${p.runtime_cost}</span><span>${p.download_size_mb?p.download_size_mb+' MB':'无需下载'}</span><span>${escapeHTML(p.privacy)}</span></div>${p.availability!=='ready'?`<div class="unavailable">未安装 · ${escapeHTML(p.install_hint||p.unavailable_reason)}</div>`:''}</div><span>${p.criteria.length} 项</span></label>`).join('');const custom=pd.profiles.find(p=>p.id==='custom');document.getElementById('customEditor').innerHTML=`<h3>Custom Profile 权重</h3><div class="weight-grid">${Object.entries(custom.weights).map(([key,value])=>`<label class="weight-row"><span>${escapeHTML(key)}</span><input type="number" min="0" max="1" step=".01" value="${value}" data-weight="${key}"></label>`).join('')}</div><button id="saveWeights">保存 Custom 权重</button>`;document.getElementById('saveWeights').onclick=saveCustomWeights;const model=document.getElementById('modelEditor');model.innerHTML=`<h3>本地偏好模型</h3><div class="model-status">${md.ready?`${md.model.training_count} 条反馈 · 验证准确率 ${Math.round(md.model.validation_accuracy*100)}% · 当前参与排序 ${Math.round(md.learned_weight*100)}%`:'至少需要 2 张保留和 2 张淘汰；此前使用显式标准与通用先验。'}</div><div class="model-actions"><button id="exportModel" ${md.ready?'':'disabled'}>导出模型</button><label><button id="importModel">导入模型</button><input id="modelFile" type="file" accept="application/json"></label><button id="resetModel">重置当前标准</button></div>`;document.getElementById('exportModel').onclick=()=>{if(!md.model)return;const link=document.createElement('a');link.href=URL.createObjectURL(new Blob([JSON.stringify(md.model,null,2)],{type:'application/json'}));link.download=`raw-curator-${md.profile_id}-model.json`;link.click()};document.getElementById('importModel').onclick=()=>document.getElementById('modelFile').click();document.getElementById('modelFile').onchange=async e=>{const data=JSON.parse(await e.target.files[0].text());const r=await(await fetch('/api/model/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})).json();statusEl.textContent=r.ok?'模型已导入并重新排序':r.error;if(r.ok){await loadCandidates();await loadPlugins()}};document.getElementById('resetModel').onclick=async()=>{const r=await(await fetch('/api/model/reset',{method:'POST'})).json();if(r.ok){statusEl.textContent='当前标准的反馈与个人模型已重置';await loadCandidates();await loadPlugins()}};settingsPanel.classList.add('open')}
+async function loadPlugins(){const [d,pd,md,ed]=await Promise.all([fetch('/api/plugins').then(r=>r.json()),fetch('/api/profiles').then(r=>r.json()),fetch('/api/model').then(r=>r.json()),fetch('/api/evaluation').then(r=>r.json())]);pluginList.innerHTML=d.plugins.map(p=>`<label class="plugin-card"><input type="checkbox" data-plugin="${p.id}" ${p.enabled?'checked':''} ${p.id==='builtin.objective'||p.availability!=='ready'?'disabled':''}><div><strong>${escapeHTML(p.name)}</strong><p>${escapeHTML(p.description)}</p><div class="plugin-meta"><span>${p.runtime_cost}</span><span>${p.download_size_mb?p.download_size_mb+' MB':'无需下载'}</span><span>${escapeHTML(p.privacy)}</span></div>${p.availability!=='ready'?`<div class="unavailable">未安装 · ${escapeHTML(p.install_hint||p.unavailable_reason)}</div>`:''}</div><span>${p.criteria.length} 项</span></label>`).join('');const custom=pd.profiles.find(p=>p.id==='custom');document.getElementById('customEditor').innerHTML=`<h3>Custom Profile 权重</h3><div class="weight-grid">${Object.entries(custom.weights).map(([key,value])=>`<label class="weight-row"><span>${escapeHTML(key)}</span><input type="number" min="0" max="1" step=".01" value="${value}" data-weight="${key}"></label>`).join('')}</div><button id="saveWeights">保存 Custom 权重</button>`;document.getElementById('saveWeights').onclick=saveCustomWeights;const model=document.getElementById('modelEditor'),evaluation=ed.test_count?`<br>本地留出 ${ed.test_count} 张 · 个人 Pairwise ${Math.round(ed.personal_ranker.pairwise_accuracy*100)}% · 显式基线 ${Math.round(ed.explicit_profile.pairwise_accuracy*100)}% · NDCG ${ed.personal_ranker.ndcg}${ed.personalization_improved?' · 已超过基线':' · 尚未超过基线'}`:'';model.innerHTML=`<h3>本地偏好模型</h3><div class="model-status">${md.ready?`${md.model.training_count} 条反馈 · 训练对一致率 ${Math.round(md.model.validation_accuracy*100)}% · 当前参与排序 ${Math.round(md.learned_weight*100)}%`:'至少需要 2 张保留和 2 张淘汰；此前使用显式标准与通用先验。'}${evaluation}</div><div class="model-actions"><button id="exportModel" ${md.ready?'':'disabled'}>导出模型</button><label><button id="importModel">导入模型</button><input id="modelFile" type="file" accept="application/json"></label><button id="resetModel">重置当前标准</button></div>`;document.getElementById('exportModel').onclick=()=>{if(!md.model)return;const link=document.createElement('a');link.href=URL.createObjectURL(new Blob([JSON.stringify(md.model,null,2)],{type:'application/json'}));link.download=`raw-curator-${md.profile_id}-model.json`;link.click()};document.getElementById('importModel').onclick=()=>document.getElementById('modelFile').click();document.getElementById('modelFile').onchange=async e=>{const data=JSON.parse(await e.target.files[0].text());const r=await(await fetch('/api/model/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})).json();statusEl.textContent=r.ok?'模型已导入并重新排序':r.error;if(r.ok){await loadCandidates();await loadPlugins()}};document.getElementById('resetModel').onclick=async()=>{const r=await(await fetch('/api/model/reset',{method:'POST'})).json();if(r.ok){statusEl.textContent='当前标准的反馈与个人模型已重置';await loadCandidates();await loadPlugins()}};settingsPanel.classList.add('open')}
 async function saveCustomWeights(){const weights=Object.fromEntries([...document.querySelectorAll('[data-weight]')].map(input=>[input.dataset.weight,Number(input.value)]));const d=await(await fetch('/api/profile/custom',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({weights})})).json();statusEl.textContent=d.ok?'Custom 权重已保存并重新排序':d.error}
 document.getElementById('settingsButton').onclick=loadPlugins;document.getElementById('closeSettings').onclick=()=>settingsPanel.classList.remove('open');pluginList.onchange=async e=>{const id=e.target.dataset.plugin;if(!id)return;e.target.disabled=true;const d=await(await fetch('/api/plugin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plugin_id:id,enabled:e.target.checked})})).json();statusEl.textContent=d.ok?(e.target.checked?'标准已启用，点击“生成 Top 5”补充分析':'标准已关闭'):d.error;if(!d.ok)e.target.checked=!e.target.checked;e.target.disabled=false};
 loadProfiles();loadCandidates();

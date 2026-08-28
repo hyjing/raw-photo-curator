@@ -261,6 +261,14 @@ final_score = explicit_weight * explicit_score
 
 `learned_weight` 随有效反馈量和验证表现增加；个人模型未超过基线时，不提高其权重。
 
+### Active feedback and evaluation
+
+下一组候选以 60% 当前推荐质量、25% 个人模型不确定性和 15% embedding 场景多样性进行
+贪心选择。没有个人模型时不伪造不确定性，只使用质量和多样性。反馈按稳定路径顺序做
+75/25 本地拆分，报告通用先验、显式 Profile 和个人模型的 pairwise accuracy、Top-5 hit
+rate、NDCG、95% bootstrap 区间，以及 5/10/20/50 条反馈学习曲线。匿名统计设置默认
+`off`，当前版本没有任何上传实现。
+
 ## 9. Explanation design
 
 解释由结构化决策记录生成，不由语言模型猜测：
