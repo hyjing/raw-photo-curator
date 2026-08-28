@@ -5,14 +5,15 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .criteria import CriterionDefinition, CriterionResult
 from .grouping import SimilarityGroup
 from .metadata import PhotoMetadata
 from .models import Metrics, Result
 
 ANALYZER_ID = "builtin.objective"
-ANALYZER_VERSION = "3"
+ANALYZER_VERSION = "4"
 SAMPLE_SIZE = 64 * 1024
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _now() -> str:
@@ -118,6 +119,25 @@ class Catalog:
                 """
             )
             self.connection.execute("PRAGMA user_version = 3")
+            version = 3
+        if version < 4:
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS criterion_definitions (
+                    id TEXT PRIMARY KEY, definition_json TEXT NOT NULL,
+                    analyzer_id TEXT NOT NULL, analyzer_version TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS criterion_results (
+                    photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                    criterion_id TEXT NOT NULL REFERENCES criterion_definitions(id),
+                    value_json TEXT NOT NULL, normalized_score REAL,
+                    confidence REAL NOT NULL, evidence_json TEXT NOT NULL,
+                    analyzer_version TEXT NOT NULL, computed_at TEXT NOT NULL,
+                    PRIMARY KEY(photo_id, criterion_id, analyzer_version)
+                );
+                """
+            )
+            self.connection.execute("PRAGMA user_version = 4")
         self.connection.commit()
 
     def prune_missing(self) -> int:
@@ -165,6 +185,8 @@ class Catalog:
         perceptual_hash: str | None = None,
         embedding: tuple[float, ...] | None = None,
         embedding_version: str | None = None,
+        criterion_definitions: tuple[CriterionDefinition, ...] = (),
+        criterion_results: list[CriterionResult] | None = None,
     ) -> None:
         path = result.path
         stat = path.stat()
@@ -200,6 +222,40 @@ class Catalog:
                     embedding_version,
                 ),
             )
+            for definition in criterion_definitions:
+                self.connection.execute(
+                    """INSERT INTO criterion_definitions
+                    (id, definition_json, analyzer_id, analyzer_version) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET definition_json=excluded.definition_json,
+                    analyzer_id=excluded.analyzer_id, analyzer_version=excluded.analyzer_version""",
+                    (
+                        definition.id,
+                        json.dumps(asdict(definition)),
+                        ANALYZER_ID,
+                        ANALYZER_VERSION,
+                    ),
+                )
+            for criterion in criterion_results or []:
+                self.connection.execute(
+                    """INSERT INTO criterion_results
+                    (photo_id, criterion_id, value_json, normalized_score, confidence,
+                    evidence_json, analyzer_version, computed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(photo_id, criterion_id, analyzer_version) DO UPDATE SET
+                    value_json=excluded.value_json, normalized_score=excluded.normalized_score,
+                    confidence=excluded.confidence, evidence_json=excluded.evidence_json,
+                    computed_at=excluded.computed_at""",
+                    (
+                        photo_id,
+                        criterion.criterion_id,
+                        json.dumps(criterion.value),
+                        criterion.normalized_score,
+                        criterion.confidence,
+                        json.dumps(criterion.evidence),
+                        criterion.analyzer_version,
+                        now,
+                    ),
+                )
             self.connection.execute(
                 """INSERT INTO analysis_cache(photo_id, analyzer_id, analyzer_version,
                 keep_score, edit_score, metrics_json, notes_json, thumbnail, updated_at)
@@ -240,6 +296,88 @@ class Catalog:
                 }
             )
         return records
+
+    def criteria_for_path(self, path: str) -> list[dict[str, object]]:
+        photo = self.connection.execute(
+            "SELECT id FROM photos WHERE path = ?", (path,)
+        ).fetchone()
+        if not photo:
+            return []
+        group = self.connection.execute(
+            "SELECT group_id FROM group_members WHERE photo_id = ? LIMIT 1", (photo["id"],)
+        ).fetchone()
+        output = []
+        rows = self.connection.execute(
+            """SELECT cr.*, cd.definition_json FROM criterion_results cr
+            JOIN criterion_definitions cd ON cd.id = cr.criterion_id
+            WHERE cr.photo_id = ? AND cr.analyzer_version = ?
+            ORDER BY cr.criterion_id""",
+            (photo["id"], "4.0.0"),
+        ).fetchall()
+        for row in rows:
+            percentile = None
+            if group and row["normalized_score"] is not None:
+                peers = self.connection.execute(
+                    """SELECT cr.normalized_score FROM criterion_results cr
+                    JOIN group_members gm ON gm.photo_id = cr.photo_id
+                    WHERE gm.group_id = ? AND cr.criterion_id = ?
+                    AND cr.analyzer_version = ? AND cr.normalized_score IS NOT NULL""",
+                    (group["group_id"], row["criterion_id"], "4.0.0"),
+                ).fetchall()
+                percentile = round(
+                    100
+                    * sum(peer["normalized_score"] <= row["normalized_score"] for peer in peers)
+                    / max(1, len(peers))
+                )
+            definition = json.loads(row["definition_json"])
+            output.append(
+                {
+                    "id": row["criterion_id"],
+                    "label": definition["label"],
+                    "value": json.loads(row["value_json"]),
+                    "score": row["normalized_score"],
+                    "confidence": row["confidence"],
+                    "evidence": json.loads(row["evidence_json"]),
+                    "group_percentile": percentile,
+                }
+            )
+        return output
+
+    def update_metadata_and_criteria(
+        self, path: Path, metadata: PhotoMetadata, criteria: list[CriterionResult]
+    ) -> None:
+        photo = self.connection.execute(
+            "SELECT id FROM photos WHERE path = ?", (str(path),)
+        ).fetchone()
+        if not photo:
+            return
+        now = _now()
+        with self.connection:
+            self.connection.execute(
+                "UPDATE photos SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(metadata.to_dict()), now, photo["id"]),
+            )
+            for criterion in criteria:
+                self.connection.execute(
+                    """INSERT INTO criterion_results
+                    (photo_id, criterion_id, value_json, normalized_score, confidence,
+                    evidence_json, analyzer_version, computed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(photo_id, criterion_id, analyzer_version) DO UPDATE SET
+                    value_json=excluded.value_json, normalized_score=excluded.normalized_score,
+                    confidence=excluded.confidence, evidence_json=excluded.evidence_json,
+                    computed_at=excluded.computed_at""",
+                    (
+                        photo["id"],
+                        criterion.criterion_id,
+                        json.dumps(criterion.value),
+                        criterion.normalized_score,
+                        criterion.confidence,
+                        json.dumps(criterion.evidence),
+                        criterion.analyzer_version,
+                        now,
+                    ),
+                )
 
     def replace_automatic_groups(self, groups: list[SimilarityGroup]) -> None:
         now = _now()

@@ -40,9 +40,30 @@ def measure(rgb: np.ndarray) -> Metrics:
     border_noise = float(np.std(border))
     composition = _clamp(58 + center_detail * 120 - max(0.0, border_noise - center_detail) * 80)
 
+    vertical_gradient, horizontal_gradient = np.gradient(gray)
+    magnitude = np.hypot(horizontal_gradient, vertical_gradient)
+    strong = magnitude >= np.percentile(magnitude, 92)
+    if np.any(strong):
+        # A horizontal line has a near-vertical gradient. Fold all angles to 0..90 degrees.
+        angles = np.abs(np.degrees(np.arctan2(vertical_gradient[strong], horizontal_gradient[strong])))
+        deviation = np.minimum(np.abs(angles - 90), np.abs(angles - 270))
+        horizon = _clamp(100 - float(np.median(deviation)) * 2.2)
+    else:
+        horizon = 50.0
+    border_width = max(1, min(h, w) // 30)
+    border_saliency = np.concatenate(
+        (
+            magnitude[:border_width].ravel(),
+            magnitude[-border_width:].ravel(),
+            magnitude[:, :border_width].ravel(),
+            magnitude[:, -border_width:].ravel(),
+        )
+    )
+    edge_integrity = _clamp(100 - float(np.mean(border_saliency > np.percentile(magnitude, 90))) * 180)
+
     return Metrics(
         sharpness, exposure, highlights, shadows, contrast, noise,
-        color, white_balance, composition,
+        color, white_balance, composition, horizon, edge_integrity,
     )
 
 
@@ -57,7 +78,9 @@ def scores(m: Metrics, uniqueness: float = 100.0) -> tuple[float, float]:
         + m.noise * 0.07
         + m.color * 0.05
         + m.white_balance * 0.05
-        + uniqueness * 0.10
+        + m.horizon * 0.03
+        + m.edge_integrity * 0.03
+        + uniqueness * 0.04
     )
     edit = (
         m.highlights * 0.25

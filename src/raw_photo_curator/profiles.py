@@ -12,6 +12,8 @@ METRIC_IDS = (
     "color",
     "white_balance",
     "composition",
+    "horizon",
+    "edge_integrity",
 )
 
 
@@ -37,6 +39,8 @@ BASE = {
     "noise": 0.07,
     "color": 0.05,
     "white_balance": 0.05,
+    "horizon": 0.03,
+    "edge_integrity": 0.03,
 }
 
 BUILTIN_PROFILES = (

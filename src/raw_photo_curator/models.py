@@ -13,6 +13,8 @@ class Metrics:
     color: float
     white_balance: float
     composition: float
+    horizon: float = 50.0
+    edge_integrity: float = 50.0
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,5 @@
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
@@ -20,6 +20,8 @@ class PhotoMetadata:
     shutter_speed: float | None = None
     iso: int | None = None
     sequence: int | None = None
+    raw_highlight_headroom: float | None = None
+    raw_shadow_recovery: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -65,16 +67,50 @@ def metadata_from_image(image: Image.Image, path: Path) -> PhotoMetadata:
     )
 
 
-def extract_metadata(path: Path) -> PhotoMetadata:
+def extract_raw_metrics(path: Path) -> tuple[float, float]:
+    import rawpy
+
+    with rawpy.imread(str(path)) as raw:
+        visible = raw.raw_image_visible[::8, ::8].astype("float32")
+        black = float(sum(raw.black_level_per_channel) / 4)
+        white = float(raw.white_level)
+        normalized = (visible - black) / max(1.0, white - black)
+        highlight = max(0.0, round(float(100 * (1 - (normalized >= 0.995).mean() * 8)), 1))
+        shadow = max(0.0, round(float(100 * (1 - (normalized <= 0.01).mean() * 5)), 1))
+        return highlight, shadow
+
+
+def extract_metadata(path: Path, include_raw_metrics: bool = False) -> PhotoMetadata:
     if path.suffix.lower() in RAW_EXTENSIONS:
         import rawpy
 
         with rawpy.imread(str(path)) as raw:
+            highlight_headroom = shadow_recovery = None
+            if include_raw_metrics:
+                visible = raw.raw_image_visible[::8, ::8].astype("float32")
+                black = float(sum(raw.black_level_per_channel) / 4)
+                white = float(raw.white_level)
+                normalized = (visible - black) / max(1.0, white - black)
+                highlight_headroom = max(
+                    0.0, round(float(100 * (1 - (normalized >= 0.995).mean() * 8)), 1)
+                )
+                shadow_recovery = max(
+                    0.0, round(float(100 * (1 - (normalized <= 0.01).mean() * 5)), 1)
+                )
             thumbnail = raw.extract_thumb()
             if thumbnail.format != rawpy.ThumbFormat.JPEG:
-                return PhotoMetadata(sequence=_sequence(path))
+                return PhotoMetadata(
+                    sequence=_sequence(path),
+                    raw_highlight_headroom=highlight_headroom,
+                    raw_shadow_recovery=shadow_recovery,
+                )
             with Image.open(BytesIO(thumbnail.data)) as image:
-                return metadata_from_image(image, path)
+                metadata = metadata_from_image(image, path)
+                return replace(
+                    metadata,
+                    raw_highlight_headroom=highlight_headroom,
+                    raw_shadow_recovery=shadow_recovery,
+                )
     with Image.open(path) as image:
         return metadata_from_image(image, path)
 

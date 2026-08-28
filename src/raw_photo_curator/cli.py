@@ -2,15 +2,17 @@ import argparse
 import json
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from .catalog import Catalog, fingerprint
 from .embedding import ColorGridEmbedding
 from .evaluation import grouping_metrics
 from .grouping import build_groups
-from .image_io import as_array, discover, load_preview
-from .metadata import extract_metadata, perceptual_hash
+from .image_io import RAW_EXTENSIONS, as_array, discover, load_preview
+from .metadata import PhotoMetadata, extract_metadata, extract_raw_metrics, perceptual_hash
 from .models import Result
+from .objective import BuiltinObjectivePlugin
 from .report import write_report
 from .scoring import explain, measure, scores
 from .server import serve
@@ -38,6 +40,7 @@ def analyze(
         progress(0, len(paths))
     with Catalog(output / "catalog.sqlite3") as catalog:
         embedder = ColorGridEmbedding()
+        objective_plugin = BuiltinObjectivePlugin()
         run_stats["deleted"] = catalog.prune_missing()
         for number, path in enumerate(paths, start=1):
             if cancelled and cancelled():
@@ -57,12 +60,15 @@ def analyze(
                     result = Result(
                         path, keep, edit, metrics, explain(metrics), f"thumbnails/{thumb_name}"
                     )
+                    metadata = extract_metadata(path)
                     catalog.store(
                         result,
-                        extract_metadata(path),
+                        metadata,
                         perceptual_hash(image),
                         embedder.embed(image),
                         f"{embedder.id}:{embedder.version}",
+                        objective_plugin.criteria,
+                        objective_plugin.analyze_result(result, metadata),
                     )
                     results.append(result)
                     run_stats["misses"] += 1
@@ -73,6 +79,29 @@ def analyze(
             finally:
                 if progress:
                     progress(number, len(paths))
+        records = catalog.photo_records()
+        metadata_by_path = {
+            str(record["path"]): PhotoMetadata(**record["metadata"]) for record in records
+        }
+        for result in sorted(results, key=lambda item: item.keep_score, reverse=True)[:30]:
+            if result.path.suffix.lower() not in RAW_EXTENSIONS:
+                continue
+            metadata = metadata_by_path[str(result.path)]
+            if metadata.raw_highlight_headroom is None:
+                try:
+                    highlight, shadow = extract_raw_metrics(result.path)
+                    metadata = replace(
+                        metadata,
+                        raw_highlight_headroom=highlight,
+                        raw_shadow_recovery=shadow,
+                    )
+                    catalog.update_metadata_and_criteria(
+                        result.path,
+                        metadata,
+                        objective_plugin.analyze_result(result, metadata),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"RAW 线性指标不可用 {result.path}: {exc}", file=sys.stderr)
         catalog.replace_automatic_groups(build_groups(catalog.photo_records()))
     if stats:
         stats(run_stats)
