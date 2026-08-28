@@ -10,6 +10,7 @@ from .models import Metrics, Result
 ANALYZER_ID = "builtin.objective"
 ANALYZER_VERSION = "2"
 SAMPLE_SIZE = 64 * 1024
+SCHEMA_VERSION = 2
 
 
 def _now() -> str:
@@ -38,7 +39,16 @@ class Catalog:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.executescript(
+        self._migrate()
+
+    def _migrate(self) -> None:
+        version = self.connection.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"catalog schema {version} is newer than supported {SCHEMA_VERSION}"
+            )
+        if version < 1:
+            self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS photos (
                 id TEXT PRIMARY KEY,
@@ -62,9 +72,27 @@ class Catalog:
             );
             CREATE INDEX IF NOT EXISTS photos_path_state
                 ON photos(path, size, mtime_ns);
-            PRAGMA user_version = 1;
             """
-        )
+            )
+            self.connection.execute("PRAGMA user_version = 1")
+            version = 1
+        if version < 2:
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS analysis_jobs (
+                    id TEXT PRIMARY KEY,
+                    folder TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    current INTEGER NOT NULL DEFAULT 0,
+                    total INTEGER NOT NULL DEFAULT 0,
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            self.connection.execute("PRAGMA user_version = 2")
+        self.connection.commit()
 
     def prune_missing(self) -> int:
         rows = self.connection.execute("SELECT id, path FROM photos").fetchall()

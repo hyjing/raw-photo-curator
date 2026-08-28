@@ -15,7 +15,7 @@ RAW Photo Curator 的方向是：**用户定义明确规则，程序在本机学
 - [x] 未变化照片命中缓存；新增、修改和删除照片进行增量同步
 - [x] 后台任务支持进度、取消、失败后缓存续跑和断点恢复
 - [x] 分析器不再逐张打印普通状态，仅输出扫描汇总
-- [ ] 数据库 schema migration 和缓存失效测试
+- [x] 数据库 schema migration 和缓存失效测试
 
 验收标准：第二次打开 355 张照片目录时，95% 以上照片直接命中缓存；修改一张照片只重算
 该照片；中断后可以从上次进度继续。
@@ -28,7 +28,7 @@ RAW Photo Curator 的方向是：**用户定义明确规则，程序在本机学
 - [x] 将标准分为 `hard_rule`、`soft_weight`、`learned_preference`
 - [x] 明确优先级：硬规则 > 用户显式权重 > 本地偏好 > 通用先验
 - [x] Criterion 统一输出：分数、置信度、证据、版本和计算成本
-- [x] Analyzer Plugin Python Protocol（注册表与按需禁用待补）
+- [x] Analyzer Plugin Python Protocol、注册表与按需禁用
 - [ ] Profile、模型选择和权重全部本地持久化
 - [ ] 可选模型显示下载大小、运行成本和隐私边界
 

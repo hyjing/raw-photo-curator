@@ -1,8 +1,10 @@
 import os
+import sqlite3
 from pathlib import Path
 
 from PIL import Image
 
+from raw_photo_curator.catalog import SCHEMA_VERSION, Catalog
 from raw_photo_curator.cli import analyze
 
 
@@ -49,3 +51,14 @@ def test_missing_thumbnail_forces_regeneration(tmp_path: Path):
         {"hits": 0, "misses": 1, "failed": 0, "deleted": 0, "cancelled": 0}
     ]
     assert (output / result.thumbnail).is_file()
+
+
+def test_catalog_migrates_existing_v1_database(tmp_path: Path):
+    database = tmp_path / "catalog.sqlite3"
+    with Catalog(database):
+        pass
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'analysis_jobs'"
+        ).fetchone()
