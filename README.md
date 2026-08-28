@@ -34,6 +34,10 @@ raw-curator serve /path/to/photos --output reports/live
 
 然后访问 `http://127.0.0.1:8765`。服务只监听本机，不会上传照片。
 
+交互采用动态 Top 5：输入文件夹后完成全量初筛；“保留”的照片停留在候选池，“淘汰”
+的照片立即由下一张推荐补位。保留满 5 张后进入下一轮，已保留和已淘汰照片都会被排除，
+并使用累计反馈重新计算个人推荐分。
+
 ```bash
 raw-curator analyze /path/to/photos --output reports/latest --limit 50
 ```

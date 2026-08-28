@@ -60,10 +60,10 @@ def main() -> None:
     args = parser.parse_args()
     if not args.folder.is_dir():
         parser.error(f"照片文件夹不存在：{args.folder}")
-    results = analyze(args.folder, args.output, args.limit)
     if args.command == "serve":
-        serve(results, args.output, args.port, args.folder, args.limit or 5, analyze)
+        serve([], args.output, args.port, args.folder, 5, analyze)
     else:
+        results = analyze(args.folder, args.output, args.limit)
         report = write_report(results, args.output)
         print(f"\n完成：{report.resolve()}")
 

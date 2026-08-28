@@ -25,6 +25,8 @@ class SessionState:
     progress_total: int = 0
     progress_running: bool = False
     progress_stage: str = "idle"
+    candidate_paths: list[str] | None = None
+    round_number: int = 1
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -65,6 +67,50 @@ def _photo_payload(results: list[Result], database: Path) -> list[dict]:
 def _read_feedback(database: Path) -> dict[str, dict]:
     with _connect(database) as connection:
         return {row["path"]: dict(row) for row in connection.execute("SELECT * FROM feedback")}
+
+
+def _refresh_candidates(state: SessionState, database: Path) -> None:
+    feedback = _read_feedback(database)
+    scores = recommendation_scores(state.results, feedback)
+    current = set(state.candidate_paths or [])
+    kept_current = [
+        path for path in (state.candidate_paths or [])
+        if feedback.get(path, {}).get("choice") == "keep"
+    ]
+    active_unreviewed = [
+        path for path in (state.candidate_paths or []) if path not in feedback
+    ]
+    if len(kept_current) >= 5:
+        current = set()
+        kept_current = []
+        active_unreviewed = []
+        state.round_number += 1
+    excluded = set(feedback) | current
+    available = sorted(
+        (result for result in state.results if str(result.path) not in excluded),
+        key=lambda result: scores[str(result.path)],
+        reverse=True,
+    )
+    retained = kept_current + active_unreviewed
+    needed = 5 - len(retained)
+    state.candidate_paths = retained + [str(result.path) for result in available[:needed]]
+
+
+def _candidate_payload(state: SessionState, database: Path) -> list[dict]:
+    feedback = _read_feedback(database)
+    scores = recommendation_scores(state.results, feedback)
+    by_path = {str(result.path): result for result in state.results}
+    output = []
+    for path in state.candidate_paths or []:
+        result = by_path.get(path)
+        if not result:
+            continue
+        item = result.to_dict()
+        item["thumbnail"] = f"/thumbnails/{Path(result.thumbnail).name}?v={result.path.stat().st_mtime_ns}"
+        item["recommendation_score"] = scores[path]
+        item["kept"] = feedback.get(path, {}).get("choice") == "keep"
+        output.append(item)
+    return output
 
 
 def _summary(database: Path, results: list[Result]) -> dict[str, int]:
@@ -112,6 +158,13 @@ def make_handler(state: SessionState, database: Path):
                     "running": state.progress_running,
                     "stage": state.progress_stage,
                 })
+            elif route == "/api/candidates":
+                self._json({
+                    "candidates": _candidate_payload(state, database),
+                    "folder": str(state.folder),
+                    "round": state.round_number,
+                    "summary": _summary(database, state.results),
+                })
             elif route.startswith("/thumbnails/"):
                 name = Path(route).name
                 candidate = state.output / "thumbnails" / name
@@ -147,8 +200,11 @@ def make_handler(state: SessionState, database: Path):
                 if not 0 < size <= 65_536:
                     raise ValueError("invalid body size")
                 data = json.loads(self.rfile.read(size))
-                photo_id = int(data["id"])
-                result = state.results[photo_id]
+                if "path" in data:
+                    requested_path = str(data["path"])
+                    result = next(item for item in state.results if str(item.path) == requested_path)
+                else:
+                    result = state.results[int(data["id"])]
                 choice = data.get("choice")
                 rating = data.get("rating")
                 tags = data.get("tags", [])
@@ -167,8 +223,14 @@ def make_handler(state: SessionState, database: Path):
                         updated_at=excluded.updated_at""",
                         (str(result.path), choice, rating, json.dumps(tags[:8]), note, now),
                     )
-                self._json({"ok": True, "summary": _summary(database, state.results)})
-            except (ValueError, KeyError, IndexError, json.JSONDecodeError):
+                _refresh_candidates(state, database)
+                self._json({
+                    "ok": True,
+                    "summary": _summary(database, state.results),
+                    "round": state.round_number,
+                    "candidates": _candidate_payload(state, database),
+                })
+            except (ValueError, KeyError, IndexError, StopIteration, json.JSONDecodeError):
                 self._json({"ok": False, "error": "invalid feedback"}, HTTPStatus.BAD_REQUEST)
 
         def _change_folder(self) -> None:
@@ -201,6 +263,14 @@ def make_handler(state: SessionState, database: Path):
             self._json({"ok": True, "added": len(additions), "count": len(state.results)})
 
         def _build_recommendations(self) -> None:
+            size = int(self.headers.get("Content-Length", "0"))
+            if size:
+                data = json.loads(self.rfile.read(min(size, 16_384)))
+                requested = Path(str(data.get("folder", state.folder))).expanduser().resolve()
+                if not requested.is_dir():
+                    self._json({"ok": False, "error": "文件夹不存在"}, HTTPStatus.BAD_REQUEST)
+                    return
+                state.folder = requested
             state.progress_running = True
             state.progress_stage = "scanning"
 
@@ -223,6 +293,9 @@ def make_handler(state: SessionState, database: Path):
                         -scores[str(result.path)],
                     ),
                 )
+                state.round_number = 1
+                state.candidate_paths = []
+                _refresh_candidates(state, database)
                 self._json({
                     "ok": True,
                     "count": len(state.results),
@@ -255,7 +328,7 @@ def serve(results: list[Result], output: Path, port: int, folder: Path, limit: i
         server.server_close()
 
 
-APP_HTML = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+LEGACY_APP_HTML = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width"><title>RAW Photo Curator</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#0d0e10;color:#eee;font:15px system-ui}
@@ -304,4 +377,25 @@ document.getElementById('next').onclick=moveNext;
 document.getElementById('loadFolder').onclick=async()=>{const status=document.getElementById('folderStatus');status.textContent='正在分析…';const r=await fetch('/api/folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:document.getElementById('folder').value})});const d=await r.json();status.textContent=d.ok?`已加载 ${d.count} 张`:d.error;if(d.ok)await load()};
 document.getElementById('recommend').onclick=async()=>{const status=document.getElementById('folderStatus'),bar=document.getElementById('scanProgress'),button=document.getElementById('recommend');status.textContent='正在分析全部照片…';bar.hidden=false;bar.value=0;button.disabled=true;const poll=setInterval(async()=>{const p=await (await fetch('/api/progress')).json();if(p.total){bar.value=p.current/p.total*100;status.textContent=p.stage==='ranking'?'正在更新个人推荐排序…':`正在分析 ${p.current} / ${p.total}（${Math.round(p.current/p.total*100)}%）`}},500);try{const r=await fetch('/api/recommendations',{method:'POST'});const d=await r.json();if(d.ok){await load();status.textContent=`推荐榜已生成：${d.count} 张，基于 ${d.feedback_count} 条反馈`}else status.textContent='推荐生成失败'}finally{clearInterval(poll);bar.value=100;setTimeout(()=>bar.hidden=true,1200);button.disabled=false}};
 document.onkeydown=e=>{if(e.target===noteEl||e.target.id==='folder')return;if(e.key==='ArrowRight')moveNext();if(e.key==='ArrowLeft')move(-1);if('pPeEmMxX'.includes(e.key))choose(({p:'keep',e:'edit',m:'maybe',x:'reject'})[e.key.toLowerCase()])};load();
+</script></html>"""
+
+
+APP_HTML = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width"><title>RAW Photo Curator</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#0e0f11;color:#f2f2f2;font:15px system-ui}
+header{padding:22px 4vw;border-bottom:1px solid #292c31;background:#141518}h1{font-size:20px;margin:0 0 14px}.controls{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+input{flex:1;min-width:320px;background:#0c0d0f;color:#eee;border:1px solid #41444b;border-radius:9px;padding:11px}button{border:1px solid #444850;background:#24272c;color:#eee;border-radius:9px;padding:10px 13px;cursor:pointer}button:hover{background:#343840}button:disabled{opacity:.5;cursor:default}
+#start{background:#e8e8e8;color:#111;border:0;font-weight:700}progress{width:180px;accent-color:#51ce7c}#status{color:#a1a5ad;font-size:13px}.meta{display:flex;gap:20px;margin-top:13px;color:#8d9199}
+main{padding:26px 4vw 50px}.intro{color:#9498a0;margin-bottom:18px}.grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}.card{background:#1b1d21;border:1px solid #292c31;border-radius:12px;overflow:hidden}.card.kept{border:2px solid #4bd077}.card img{width:100%;aspect-ratio:3/2;object-fit:cover;background:#08090a}.body{padding:11px}.name{font-weight:650;overflow-wrap:anywhere}.score{color:#9da1a9;font-size:12px;margin:5px 0 11px}.actions{display:grid;grid-template-columns:1fr 1fr;gap:7px}.keep{background:#175b35;border-color:#338b55}.reject{background:#602424;border-color:#873838}.badge{color:#5ee18a;font-size:12px;margin-top:8px}
+@media(max-width:1000px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:600px){.grid{grid-template-columns:1fr}input{min-width:100%}}
+</style><header><h1>RAW Photo Curator</h1><div class="controls"><input id="folder" aria-label="本地照片文件夹"><button id="start">分析并生成 Top 5</button><progress id="progress" value="0" max="100" hidden></progress><span id="status">输入照片文件夹后开始</span></div><div class="meta"><span id="round">第 1 轮</span><span id="summary">尚未选择</span></div></header>
+<main><div class="intro">只做两个决定：保留会留在候选池；淘汰会立即由下一张推荐补位。保留满 5 张后自动进入新一轮，并排除所有已评价照片。</div><div class="grid" id="grid"></div></main>
+<script>
+const folder=document.getElementById('folder'),start=document.getElementById('start'),bar=document.getElementById('progress'),statusEl=document.getElementById('status'),grid=document.getElementById('grid'),roundEl=document.getElementById('round'),summaryEl=document.getElementById('summary');
+async function loadCandidates(){const d=await(await fetch('/api/candidates')).json();folder.value=d.folder;roundEl.textContent=`第 ${d.round} 轮`;summaryEl.textContent=`累计保留 ${d.summary.keep} · 淘汰 ${d.summary.reject}`;render(d.candidates)}
+function render(items){grid.innerHTML=items.map(p=>`<article class="card ${p.kept?'kept':''}"><img src="${p.thumbnail}"><div class="body"><div class="name">${p.path.split('/').pop()}</div><div class="score">推荐 ${p.recommendation_score} · 客观 ${p.keep_score}</div><div class="actions"><button class="keep" data-path="${encodeURIComponent(p.path)}" data-choice="keep">保留</button><button class="reject" data-path="${encodeURIComponent(p.path)}" data-choice="reject">淘汰</button></div>${p.kept?'<div class="badge">✓ 已保留，等待凑满 5 张</div>':''}</div></article>`).join('')}
+grid.onclick=async e=>{const choice=e.target.dataset.choice;if(!choice)return;e.target.disabled=true;const path=decodeURIComponent(e.target.dataset.path);const before=roundEl.textContent;const d=await(await fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path,choice})})).json();if(d.ok){roundEl.textContent=`第 ${d.round} 轮`;summaryEl.textContent=`累计保留 ${d.summary.keep} · 淘汰 ${d.summary.reject}`;render(d.candidates);statusEl.textContent=before!==roundEl.textContent?'已选满 5 张，偏好模型已更新并生成新一轮':'偏好模型已更新'}};
+start.onclick=async()=>{start.disabled=true;bar.hidden=false;bar.value=0;statusEl.textContent='正在扫描照片…';const poll=setInterval(async()=>{const p=await(await fetch('/api/progress')).json();if(p.total){bar.value=p.current/p.total*100;statusEl.textContent=p.stage==='ranking'?'正在根据反馈生成 Top 5…':`正在分析 ${p.current} / ${p.total}（${Math.round(p.current/p.total*100)}%）`}},500);try{const d=await(await fetch('/api/recommendations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:folder.value})})).json();if(d.ok){await loadCandidates();statusEl.textContent=`已从 ${d.count} 张照片生成 Top 5`}else statusEl.textContent=d.error||'分析失败'}finally{clearInterval(poll);bar.value=100;setTimeout(()=>bar.hidden=true,1000);start.disabled=false}};
+loadCandidates();
 </script></html>"""
