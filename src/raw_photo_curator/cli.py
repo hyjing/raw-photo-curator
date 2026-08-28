@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 
@@ -9,10 +10,12 @@ from .scoring import explain, measure, scores
 from .server import serve
 
 
-def analyze(folder: Path, output: Path, limit: int | None = None) -> list[Result]:
+def analyze(folder: Path, output: Path, limit: int | None = None, offset: int = 0) -> list[Result]:
     paths = discover(folder)
     if limit is not None:
-        paths = paths[:limit]
+        paths = paths[offset : offset + limit]
+    elif offset:
+        paths = paths[offset:]
     thumbs = output / "thumbnails"
     thumbs.mkdir(parents=True, exist_ok=True)
     results: list[Result] = []
@@ -21,7 +24,8 @@ def analyze(folder: Path, output: Path, limit: int | None = None) -> list[Result
             image = load_preview(path)
             metrics = measure(as_array(image))
             keep, edit = scores(metrics)
-            thumb_name = f"{number:05d}.jpg"
+            digest = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:16]
+            thumb_name = f"{digest}.jpg"
             image.save(thumbs / thumb_name, "JPEG", quality=84, optimize=True)
             results.append(Result(path, keep, edit, metrics, explain(metrics), f"thumbnails/{thumb_name}"))
             print(f"[{number}/{len(paths)}] {path.name}: 保留 {keep:.0f} / 调色 {edit:.0f}")

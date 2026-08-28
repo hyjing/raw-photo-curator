@@ -115,6 +115,9 @@ def make_handler(state: SessionState, database: Path):
             if route == "/api/folder":
                 self._change_folder()
                 return
+            if route == "/api/more":
+                self._load_more()
+                return
             if route != "/api/feedback":
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
@@ -166,6 +169,15 @@ def make_handler(state: SessionState, database: Path):
                 self._json({"ok": True, "count": len(new_results), "folder": str(folder)})
             except (ValueError, KeyError, json.JSONDecodeError):
                 self._json({"ok": False, "error": "无效的文件夹路径"}, HTTPStatus.BAD_REQUEST)
+
+        def _load_more(self) -> None:
+            new_results = state.analyzer(
+                state.folder, state.output, state.limit, len(state.results)
+            )
+            known = {str(result.path) for result in state.results}
+            additions = [result for result in new_results if str(result.path) not in known]
+            state.results.extend(additions)
+            self._json({"ok": True, "added": len(additions), "count": len(state.results)})
 
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -219,7 +231,7 @@ const keepEl=document.getElementById('keep'), editEl=document.getElementById('ed
 const metricsEl=document.getElementById('metrics'), tagsEl=document.getElementById('tags');
 const noteEl=document.getElementById('note'), summaryEl=document.getElementById('summary');
 const tagNames=['构图','光线','清晰度','表情','色彩','景深'];
-async function load(){const r=await fetch('/api/photos');const d=await r.json();photos=d.photos;index=0;document.getElementById('folder').value=d.folder;showSummary(d.summary);render()}
+async function load(reset=true){const r=await fetch('/api/photos');const d=await r.json();photos=d.photos;if(reset)index=0;document.getElementById('folder').value=d.folder;showSummary(d.summary);render()}
 function current(){return photos[index]} function fb(){return current().feedback ||= {choice:null,tags:[],note:''}}
 function render(){const p=current();if(!p)return;photoEl.src=p.thumbnail;nameEl.textContent=p.path.split('/').pop();pathEl.textContent=p.path;keepEl.textContent=p.keep_score;editEl.textContent=p.edit_score;positionEl.textContent=`${index+1} / ${photos.length}`;
  metricsEl.innerHTML=Object.entries(p.metrics).map(([k,v])=>`<div class="metric"><span>${labels[k]}</span><b>${v}</b></div>`).join('');
@@ -228,11 +240,12 @@ function render(){const p=current();if(!p)return;photoEl.src=p.thumbnail;nameEl.
 async function save(){const p=current(), f=fb();const r=await fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:p.id,...f})});const d=await r.json();if(d.ok)showSummary(d.summary)}
 function showSummary(s){summaryEl.textContent=`已评 ${s.reviewed} · 保留 ${s.keep} · 调色 ${s.edit} · 待定 ${s.maybe} · 淘汰 ${s.reject}`}
 function choose(c){fb().choice=fb().choice===c?null:c;render();save()} function move(n){index=Math.max(0,Math.min(photos.length-1,index+n));render()}
+async function moveNext(){if(index<photos.length-1){move(1);return}const status=document.getElementById('folderStatus');status.textContent='正在加载下一批…';const r=await fetch('/api/more',{method:'POST'});const d=await r.json();if(d.added){const oldLength=photos.length;await load(false);index=oldLength;render();status.textContent=`已加载 ${d.count} 张`}else{status.textContent='已经是最后一张'}}
 document.querySelector('.choices').onclick=e=>{if(e.target.dataset.choice)choose(e.target.dataset.choice)};
 tagsEl.onclick=e=>{const t=e.target.dataset.tag;if(t){fb().tags=fb().tags.includes(t)?fb().tags.filter(x=>x!==t):[...fb().tags,t];render();save()}};
 noteEl.oninput=()=>{fb().note=noteEl.value;clearTimeout(timer);timer=setTimeout(save,350)};
 document.getElementById('prev').onclick=()=>move(-1);
-document.getElementById('next').onclick=()=>move(1);
+document.getElementById('next').onclick=moveNext;
 document.getElementById('loadFolder').onclick=async()=>{const status=document.getElementById('folderStatus');status.textContent='正在分析…';const r=await fetch('/api/folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:document.getElementById('folder').value})});const d=await r.json();status.textContent=d.ok?`已加载 ${d.count} 张`:d.error;if(d.ok)await load()};
-document.onkeydown=e=>{if(e.target===noteEl||e.target.id==='folder')return;if(e.key==='ArrowRight')move(1);if(e.key==='ArrowLeft')move(-1);if('pPeEmMxX'.includes(e.key))choose(({p:'keep',e:'edit',m:'maybe',x:'reject'})[e.key.toLowerCase()])};load();
+document.onkeydown=e=>{if(e.target===noteEl||e.target.id==='folder')return;if(e.key==='ArrowRight')moveNext();if(e.key==='ArrowLeft')move(-1);if('pPeEmMxX'.includes(e.key))choose(({p:'keep',e:'edit',m:'maybe',x:'reject'})[e.key.toLowerCase()])};load();
 </script></html>"""
