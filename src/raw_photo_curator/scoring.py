@@ -4,7 +4,8 @@ from .models import Metrics
 
 
 def _clamp(value: float) -> float:
-    return round(max(0.0, min(100.0, value)), 1)
+    # NumPy scalars otherwise leak into dataclasses and are not JSON serializable.
+    return round(float(max(0.0, min(100.0, value))), 1)
 
 
 def measure(rgb: np.ndarray) -> Metrics:
@@ -67,4 +68,3 @@ def explain(m: Metrics) -> tuple[str, ...]:
     if not notes:
         notes.append("技术指标较均衡")
     return tuple(notes)
-
