@@ -48,3 +48,6 @@ def test_builtin_profiles_are_persisted_and_active_profile_changes(tmp_path: Pat
             "UPDATE app_settings SET value = 'landscape' WHERE key = 'active_profile'"
         )
     assert _active_profile(database).id == "landscape"
+    custom = next(profile for profile in _profiles(database) if profile.id == "custom")
+    assert "subject.saliency_concentration" in custom.weights
+    assert "horizon" in custom.weights

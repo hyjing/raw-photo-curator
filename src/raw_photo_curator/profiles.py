@@ -41,6 +41,10 @@ BASE = {
     "white_balance": 0.05,
     "horizon": 0.03,
     "edge_integrity": 0.03,
+    "subject.saliency_concentration": 0.06,
+    "subject.background_separation": 0.03,
+    "depth.separation": 0.04,
+    "timing.motion_clarity": 0.04,
 }
 
 BUILTIN_PROFILES = (
@@ -73,17 +77,23 @@ BUILTIN_PROFILES = (
 )
 
 
-def weighted_score(result: Result, profile: Profile) -> float:
+def weighted_score(
+    result: Result, profile: Profile, criteria: list[dict[str, object]] | None = None
+) -> float:
     values = result.metrics.__dict__
+    criterion_values = {
+        str(item["id"]): float(item["score"]) * 100
+        for item in criteria or []
+        if item.get("score") is not None and float(item.get("confidence", 0)) >= 0.35
+    }
+    all_values = {**values, **criterion_values}
     usable = {
-        key: weight
-        for key, weight in profile.weights.items()
-        if key in values and weight > 0
+        key: weight for key, weight in profile.weights.items() if key in all_values and weight > 0
     }
     total = sum(usable.values())
     if not total:
         return result.keep_score
-    return round(sum(values[key] * weight for key, weight in usable.items()) / total, 1)
+    return round(sum(all_values[key] * weight for key, weight in usable.items()) / total, 1)
 
 
 def hard_rule_reasons(result: Result, profile: Profile) -> tuple[str, ...]:

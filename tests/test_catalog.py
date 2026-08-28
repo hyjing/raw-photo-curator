@@ -21,7 +21,7 @@ def test_analysis_cache_hits_and_invalidates_changed_file(tmp_path: Path):
         {"hits": 0, "misses": 1, "failed": 0, "deleted": 0, "cancelled": 0}
     ]
     with sqlite3.connect(output / "catalog.sqlite3") as connection:
-        assert connection.execute("SELECT count(*) FROM criterion_results").fetchone()[0] == 13
+        assert connection.execute("SELECT count(*) FROM criterion_results").fetchone()[0] == 17
 
     warm_stats: list[dict[str, int]] = []
     analyze(photos, output, stats=warm_stats.append)

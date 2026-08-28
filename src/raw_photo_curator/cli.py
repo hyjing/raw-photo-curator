@@ -13,6 +13,7 @@ from .image_io import RAW_EXTENSIONS, as_array, discover, load_preview
 from .metadata import PhotoMetadata, extract_metadata, extract_raw_metrics, perceptual_hash
 from .models import Result
 from .objective import BuiltinObjectivePlugin
+from .plugins import default_registry
 from .report import write_report
 from .scoring import explain, measure, scores
 from .server import serve
@@ -41,12 +42,25 @@ def analyze(
     with Catalog(output / "catalog.sqlite3") as catalog:
         embedder = ColorGridEmbedding()
         objective_plugin = BuiltinObjectivePlugin()
+        configured = catalog.plugin_settings()
+        enabled_ids = (
+            {plugin_id for plugin_id, enabled in configured.items() if enabled}
+            if configured
+            else {"builtin.objective", "builtin.saliency", "builtin.timing-depth"}
+        )
+        plugin_registry = default_registry(enabled_ids)
+        preview_plugins = [
+            plugin
+            for plugin in plugin_registry.enabled()
+            if plugin.id != objective_plugin.id and hasattr(plugin, "analyze_image")
+        ]
         run_stats["deleted"] = catalog.prune_missing()
         for number, path in enumerate(paths, start=1):
             if cancelled and cancelled():
                 run_stats["cancelled"] = 1
                 break
             try:
+                image = None
                 cached = catalog.cached(path, output)
                 if cached:
                     results.append(cached)
@@ -72,6 +86,12 @@ def analyze(
                     )
                     results.append(result)
                     run_stats["misses"] += 1
+                for plugin in preview_plugins:
+                    if not catalog.has_plugin_results(path, plugin):
+                        image = image or load_preview(path)
+                        catalog.store_plugin_results(
+                            path, plugin, plugin.analyze_image(image)
+                        )
             # A damaged/unsupported file should not abort a long folder scan.
             except Exception as exc:  # noqa: BLE001
                 run_stats["failed"] += 1

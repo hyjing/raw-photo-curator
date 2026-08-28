@@ -51,6 +51,16 @@ class Availability:
 
 
 @dataclass(frozen=True)
+class PluginManifest:
+    name: str
+    description: str
+    download_size_mb: float
+    runtime_cost: CriterionCost
+    privacy: str = "完全本地，不联网"
+    install_hint: str = ""
+
+
+@dataclass(frozen=True)
 class PhotoInput:
     path: Path
 

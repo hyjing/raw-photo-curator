@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 
 from .criteria import AnalyzerPlugin, Availability, RuntimeEnvironment
+from .objective import BuiltinObjectivePlugin
+from .optional_plugins import builtin_plugins
 
 
 @dataclass
@@ -41,10 +43,36 @@ class PluginRegistry:
         return [
             {
                 "id": plugin.id,
+                "name": getattr(getattr(plugin, "manifest", None), "name", plugin.id),
+                "description": getattr(getattr(plugin, "manifest", None), "description", ""),
                 "version": plugin.version,
                 "enabled": plugin.id in self._enabled,
                 "availability": self.availability(plugin.id).status,
+                "unavailable_reason": self.availability(plugin.id).reason,
+                "download_size_mb": getattr(
+                    getattr(plugin, "manifest", None), "download_size_mb", 0
+                ),
+                "runtime_cost": getattr(
+                    getattr(getattr(plugin, "manifest", None), "runtime_cost", None),
+                    "value",
+                    "cheap",
+                ),
+                "privacy": getattr(
+                    getattr(plugin, "manifest", None), "privacy", "完全本地，不联网"
+                ),
+                "install_hint": getattr(
+                    getattr(plugin, "manifest", None), "install_hint", ""
+                ),
                 "criteria": [criterion.id for criterion in plugin.criteria],
             }
             for plugin in self._plugins.values()
         ]
+
+
+def default_registry(enabled: set[str] | None = None) -> PluginRegistry:
+    if enabled is None:
+        enabled = {"builtin.objective", "builtin.saliency", "builtin.timing-depth"}
+    registry = PluginRegistry()
+    for plugin in (BuiltinObjectivePlugin(), *builtin_plugins()):
+        registry.register(plugin, plugin.id in enabled)
+    return registry

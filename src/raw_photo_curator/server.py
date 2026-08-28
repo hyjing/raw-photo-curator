@@ -14,7 +14,8 @@ from PIL import Image
 
 from .catalog import Catalog
 from .models import Result
-from .profiles import BUILTIN_PROFILES, Profile, hard_rule_reasons, weighted_score
+from .plugins import default_registry
+from .profiles import BUILTIN_PROFILES, METRIC_IDS, Profile, hard_rule_reasons, weighted_score
 from .recommendation import recommendation_scores
 
 CHOICES = {"keep", "edit", "reject", "maybe", None}
@@ -83,17 +84,35 @@ def _connect(path: Path) -> sqlite3.Connection:
     )
     for profile in BUILTIN_PROFILES:
         connection.execute(
-            """INSERT OR IGNORE INTO profiles
+            """INSERT INTO profiles
             (id, name, weights, hard_rules, enabled_plugins, is_builtin)
-            VALUES (?, ?, ?, ?, ?, 1)""",
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+            name=CASE WHEN excluded.is_builtin=1 THEN excluded.name ELSE profiles.name END,
+            weights=CASE WHEN excluded.is_builtin=1 THEN excluded.weights ELSE profiles.weights END,
+            hard_rules=CASE WHEN excluded.is_builtin=1 THEN excluded.hard_rules ELSE profiles.hard_rules END,
+            enabled_plugins=CASE WHEN excluded.is_builtin=1 THEN excluded.enabled_plugins ELSE profiles.enabled_plugins END,
+            is_builtin=excluded.is_builtin""",
             (
                 profile.id,
                 profile.name,
                 json.dumps(profile.weights),
                 json.dumps(profile.hard_rules),
                 json.dumps(profile.enabled_plugins),
+                int(profile.id != "custom"),
             ),
         )
+    custom_defaults = next(profile for profile in BUILTIN_PROFILES if profile.id == "custom")
+    custom_row = connection.execute(
+        "SELECT weights FROM profiles WHERE id = 'custom'"
+    ).fetchone()
+    custom_weights = json.loads(custom_row["weights"])
+    for criterion_id, weight in custom_defaults.weights.items():
+        custom_weights.setdefault(criterion_id, weight)
+    connection.execute(
+        "UPDATE profiles SET weights = ?, is_builtin = 0 WHERE id = 'custom'",
+        (json.dumps(custom_weights),),
+    )
     connection.execute(
         "INSERT OR IGNORE INTO app_settings(key, value) VALUES ('active_profile', 'travel')"
     )
@@ -121,6 +140,20 @@ def _active_profile(database: Path) -> Profile:
             "SELECT value FROM app_settings WHERE key = 'active_profile'"
         ).fetchone()["value"]
     return next((profile for profile in _profiles(database) if profile.id == active), _profiles(database)[0])
+
+
+def _profile_priors(
+    results: list[Result], profile: Profile, catalog_path: Path
+) -> dict[str, float]:
+    if not catalog_path.is_file():
+        return {str(result.path): weighted_score(result, profile) for result in results}
+    with Catalog(catalog_path) as catalog:
+        return {
+            str(result.path): weighted_score(
+                result, profile, catalog.criteria_for_path(str(result.path))
+            )
+            for result in results
+        }
 
 
 def _photo_payload(results: list[Result], database: Path) -> list[dict]:
@@ -151,7 +184,7 @@ def _read_feedback(database: Path) -> dict[str, dict]:
 def _refresh_candidates(state: SessionState, database: Path) -> None:
     feedback = _read_feedback(database)
     profile = _active_profile(database)
-    priors = {str(result.path): weighted_score(result, profile) for result in state.results}
+    priors = _profile_priors(state.results, profile, state.output / "catalog.sqlite3")
     scores = recommendation_scores(state.results, feedback, priors)
     current = set(state.candidate_paths or [])
     kept_current = [
@@ -186,7 +219,7 @@ def _candidate_payload(state: SessionState, database: Path) -> list[dict]:
     with _connect(database) as connection:
         rotations = {row["path"]: row["degrees"] for row in connection.execute("SELECT * FROM rotations")}
     profile = _active_profile(database)
-    priors = {str(result.path): weighted_score(result, profile) for result in state.results}
+    priors = _profile_priors(state.results, profile, state.output / "catalog.sqlite3")
     scores = recommendation_scores(state.results, feedback, priors)
     by_path = {str(result.path): result for result in state.results}
     output = []
@@ -300,6 +333,15 @@ def make_handler(state: SessionState, database: Path):
                             (group["id"], member["id"])
                         )
                 self._json({"groups": groups})
+            elif route == "/api/plugins":
+                with Catalog(state.output / "catalog.sqlite3") as catalog:
+                    configured = catalog.plugin_settings()
+                enabled = (
+                    {plugin_id for plugin_id, value in configured.items() if value}
+                    if configured
+                    else None
+                )
+                self._json({"plugins": default_registry(enabled).describe()})
             elif route.startswith("/thumbnails/"):
                 name = Path(route).name
                 candidate = state.output / "thumbnails" / name
@@ -341,11 +383,17 @@ def make_handler(state: SessionState, database: Path):
             if route == "/api/profile":
                 self._change_profile()
                 return
+            if route == "/api/profile/custom":
+                self._update_custom_profile()
+                return
             if route == "/api/groups/correct":
                 self._correct_groups()
                 return
             if route == "/api/group-feedback":
                 self._save_group_feedback()
+                return
+            if route == "/api/plugin":
+                self._change_plugin()
                 return
             if route == "/api/rotation":
                 self._rotate_photo()
@@ -474,10 +522,9 @@ def make_handler(state: SessionState, database: Path):
                 state.progress_stage = "ranking"
                 feedback = _read_feedback(database)
                 profile = _active_profile(database)
-                priors = {
-                    str(result.path): weighted_score(result, profile)
-                    for result in all_results
-                }
+                priors = _profile_priors(
+                    all_results, profile, state.output / "catalog.sqlite3"
+                )
                 scores = recommendation_scores(all_results, feedback, priors)
                 reviewed_paths = set(feedback)
                 state.results = sorted(
@@ -544,6 +591,39 @@ def make_handler(state: SessionState, database: Path):
             except (ValueError, KeyError, json.JSONDecodeError):
                 self._json({"ok": False, "error": "invalid profile"}, HTTPStatus.BAD_REQUEST)
 
+        def _update_custom_profile(self) -> None:
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(min(size, 65_536)))
+                weights = {str(key): float(value) for key, value in data["weights"].items()}
+                registry = default_registry(set())
+                valid = set(METRIC_IDS) | {
+                    criterion_id
+                    for plugin in registry.describe()
+                    for criterion_id in plugin["criteria"]
+                }
+                if not weights or not set(weights) <= valid or any(
+                    value < 0 or value > 1 for value in weights.values()
+                ):
+                    raise ValueError("invalid weights")
+                with _connect(database) as connection:
+                    connection.execute(
+                        """UPDATE profiles SET name = ?, weights = ?, hard_rules = ?,
+                        enabled_plugins = ?, is_builtin = 0 WHERE id = 'custom'""",
+                        (
+                            str(data.get("name", "Custom"))[:40],
+                            json.dumps(weights),
+                            json.dumps(data.get("hard_rules", {})),
+                            json.dumps(data.get("enabled_plugins", ["builtin.objective"])),
+                        ),
+                    )
+                if _active_profile(database).id == "custom":
+                    state.candidate_paths = []
+                    _refresh_candidates(state, database)
+                self._json({"ok": True})
+            except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+                self._json({"ok": False, "error": "invalid custom profile"}, HTTPStatus.BAD_REQUEST)
+
         def _correct_groups(self) -> None:
             try:
                 size = int(self.headers.get("Content-Length", "0"))
@@ -604,6 +684,41 @@ def make_handler(state: SessionState, database: Path):
                 self._json({"ok": True})
             except (ValueError, KeyError, StopIteration, json.JSONDecodeError):
                 self._json({"ok": False, "error": "invalid group feedback"}, HTTPStatus.BAD_REQUEST)
+
+        def _change_plugin(self) -> None:
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(min(size, 16_384)))
+                plugin_id, enabled = str(data["plugin_id"]), data["enabled"]
+                if not isinstance(enabled, bool) or plugin_id == "builtin.objective":
+                    raise ValueError("invalid setting")
+                registry = default_registry(set())
+                known = {item["id"]: item for item in registry.describe()}
+                if plugin_id not in known:
+                    raise ValueError("unknown plugin")
+                if enabled and known[plugin_id]["availability"] != "ready":
+                    self._json(
+                        {
+                            "ok": False,
+                            "error": known[plugin_id]["unavailable_reason"],
+                            "install_hint": known[plugin_id]["install_hint"],
+                        },
+                        HTTPStatus.CONFLICT,
+                    )
+                    return
+                with Catalog(state.output / "catalog.sqlite3") as catalog:
+                    current = catalog.plugin_settings()
+                    if not current:
+                        for default_id in (
+                            "builtin.objective",
+                            "builtin.saliency",
+                            "builtin.timing-depth",
+                        ):
+                            catalog.set_plugin_enabled(default_id, True)
+                    catalog.set_plugin_enabled(plugin_id, enabled)
+                self._json({"ok": True, "requires_analysis": enabled})
+            except (ValueError, KeyError, json.JSONDecodeError):
+                self._json({"ok": False, "error": "invalid plugin setting"}, HTTPStatus.BAD_REQUEST)
 
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -689,11 +804,14 @@ header{position:sticky;top:0;z-index:5;padding:18px 4vw 16px;border-bottom:1px s
 main{max-width:1540px;margin:auto;padding:28px 4vw 60px}.grid{display:grid;grid-template-columns:1fr;gap:26px}.card{position:relative;display:grid;grid-template-columns:minmax(0,1.8fr) minmax(350px,.82fr);background:linear-gradient(145deg,#171b23,#11141a);border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:0 18px 60px #0005}.card.kept{border-color:#56d88d;box-shadow:0 18px 60px #0005,0 0 0 1px #56d88d55}.rank{position:absolute;z-index:2;top:14px;left:14px;padding:7px 10px;border:1px solid #ffffff26;border-radius:10px;background:#07090ba8;backdrop-filter:blur(12px);font-weight:800}.photo-wrap{position:relative;display:grid;place-items:center;min-height:470px;background:linear-gradient(145deg,#08090c,#0e1116)}.card img{display:block;width:100%;height:100%;max-height:72vh;object-fit:contain}.body{display:flex;flex-direction:column;padding:23px}.eyebrow{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.title-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:5px}.name{font-size:18px;font-weight:750;overflow-wrap:anywhere}.rotate{position:absolute;z-index:2;top:14px;right:14px;padding:9px 13px;white-space:nowrap;background:#07090bc7;border-color:#ffffff2b;backdrop-filter:blur(12px);box-shadow:0 5px 18px #0006}.rotate:hover{background:#20252ee8}.score{display:flex;gap:9px;margin:16px 0 12px}.score span{display:flex;flex-direction:column;gap:2px;flex:1;padding:10px 12px;border:1px solid var(--line);border-radius:12px;color:var(--muted);font-size:11px;background:#0b0e13}.score strong{font-size:22px;color:var(--text);line-height:1.1}.reason{min-height:44px;color:#c8ccd4;line-height:1.55}.evidence{display:flex;gap:5px;flex-wrap:wrap}.evidence span{padding:4px 7px;border-radius:7px;background:#ffffff08;color:#aeb5c0;font-size:10px}.evidence .unknown{color:#ffcf87}.radar{display:block;width:100%;max-width:280px;margin:auto}.radar .gridline{fill:none;stroke:#343a46;stroke-width:1}.radar .axis{stroke:#2b303a}.radar .shape{fill:#72eca535;stroke:#72eca5;stroke-width:2}.radar text{fill:#aeb4bf;font:11px system-ui}.actions{display:grid;grid-template-columns:1.25fr 1fr;gap:9px;margin-top:auto;padding-top:14px}.actions button{font-weight:700}.keep{background:#22633e;border-color:#388d5b}.keep:hover{background:#2b784b}.reject{background:#302328;border-color:#5a343d;color:#ffc4c4}.reject:hover{background:#48282f}.badge{color:var(--accent);font-size:12px;margin-top:9px}
 @media(max-width:900px){header{position:relative}.card{grid-template-columns:1fr}.photo-wrap{min-height:0}.card img{max-height:none;aspect-ratio:3/2}.radar{max-width:250px}}@media(max-width:640px){.controls{grid-template-columns:1fr}.topline{align-items:flex-start}.meta{flex-direction:column}.card{border-radius:15px}.body{padding:18px}}
 .group-panel{position:fixed;inset:0;z-index:20;display:none;background:#07090be8;backdrop-filter:blur(16px);overflow:auto;padding:24px 4vw 60px}.group-panel.open{display:block}.group-toolbar{position:sticky;top:0;z-index:3;display:flex;align-items:center;gap:12px;padding:12px 0 18px;background:#07090be8}.group-toolbar h2{margin:0 auto 0 0}.group-list{display:grid;gap:22px}.similarity-group{padding:18px;border:1px solid var(--line);border-radius:18px;background:var(--surface)}.group-head{display:flex;gap:10px;align-items:center;margin-bottom:13px}.group-head strong{margin-right:auto}.member-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.member{position:relative;overflow:hidden;border-radius:12px;background:#050608;aspect-ratio:3/2}.member img{width:100%;height:100%;object-fit:contain;transform:scale(var(--group-zoom,1));transition:transform .15s}.member label{position:absolute;left:8px;bottom:8px;padding:5px 8px;border-radius:8px;background:#050608cc;font-size:11px}.member input{width:auto}.member-actions{position:absolute;display:flex;gap:5px;right:7px;top:7px}.member-actions button{padding:5px 7px;font-size:11px;background:#080a0dcc}.member-actions .chosen{border-color:var(--accent);color:var(--accent)}.split{margin-top:12px}
-</style><header><div class="topline"><div class="brand"><div class="mark">R</div><div><h1>RAW Photo Curator</h1><small>Local-first photo selection</small></div></div><div class="meta"><span class="chip" id="round">第 1 轮</span><span class="chip" id="summary">尚未选择</span></div></div><div class="controls"><label class="pathbox"><span>⌁</span><input id="folder" aria-label="本地照片文件夹" placeholder="输入包含 ARW / JPG 的照片文件夹"></label><select id="profile" aria-label="选片标准"></select><div><button id="groupsButton">相似组</button> <button id="cancel" hidden>取消</button> <button id="start">生成 Top 5</button></div></div><div class="activity"><progress id="progress" value="0" max="100" hidden></progress><span id="status">输入本地照片路径，分析结果只保存在这台设备</span></div></header>
-<main><div class="grid" id="grid"></div></main><section class="group-panel" id="groupPanel"><div class="group-toolbar"><h2>相似照片与连拍组</h2><label>同步缩放 <input id="groupZoom" type="range" min="1" max="3" step=".1" value="1"></label><button id="mergeGroups">合并选中组</button><button id="closeGroups">关闭</button></div><div class="group-list" id="groupList"></div></section>
+.settings-panel{position:fixed;inset:0;z-index:30;display:none;place-items:center;background:#05070acc;backdrop-filter:blur(14px);padding:20px}.settings-panel.open{display:grid}.settings-card{width:min(760px,96vw);max-height:88vh;overflow:auto;padding:22px;border:1px solid var(--line);border-radius:20px;background:#12161d}.settings-head{display:flex;align-items:center}.settings-head h2{margin:0 auto 5px 0}.plugin-list{display:grid;gap:10px;margin-top:15px}.plugin-card{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:start;padding:14px;border:1px solid var(--line);border-radius:13px;background:#0b0e13}.plugin-card input{width:auto}.plugin-card strong{display:block}.plugin-card p{margin:5px 0;color:var(--muted);font-size:12px;line-height:1.45}.plugin-meta{display:flex;gap:6px;flex-wrap:wrap}.plugin-meta span{padding:3px 6px;border-radius:6px;background:#ffffff08;color:#abb1bc;font-size:10px}.unavailable{color:#ffba82;font-size:11px}
+.custom-editor{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}.custom-editor h3{margin:0 0 10px}.weight-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px}.weight-row{display:grid;grid-template-columns:1fr 80px;gap:8px;align-items:center;color:#bcc2cc;font-size:12px}.weight-row input{padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#090c11}.custom-editor button{margin-top:12px}
+</style><header><div class="topline"><div class="brand"><div class="mark">R</div><div><h1>RAW Photo Curator</h1><small>Local-first photo selection</small></div></div><div class="meta"><span class="chip" id="round">第 1 轮</span><span class="chip" id="summary">尚未选择</span></div></div><div class="controls"><label class="pathbox"><span>⌁</span><input id="folder" aria-label="本地照片文件夹" placeholder="输入包含 ARW / JPG 的照片文件夹"></label><select id="profile" aria-label="选片标准"></select><div><button id="settingsButton">标准设置</button> <button id="groupsButton">相似组</button> <button id="cancel" hidden>取消</button> <button id="start">生成 Top 5</button></div></div><div class="activity"><progress id="progress" value="0" max="100" hidden></progress><span id="status">输入本地照片路径，分析结果只保存在这台设备</span></div></header>
+<main><div class="grid" id="grid"></div></main><section class="group-panel" id="groupPanel"><div class="group-toolbar"><h2>相似照片与连拍组</h2><label>同步缩放 <input id="groupZoom" type="range" min="1" max="3" step=".1" value="1"></label><button id="mergeGroups">合并选中组</button><button id="closeGroups">关闭</button></div><div class="group-list" id="groupList"></div></section><section class="settings-panel" id="settingsPanel"><div class="settings-card"><div class="settings-head"><div><h2>分析标准</h2><span id="settingsHint">所有分析默认在本机完成</span></div><button id="closeSettings">关闭</button></div><div class="plugin-list" id="pluginList"></div><div class="custom-editor" id="customEditor"></div></div></section>
 <script>
 const folder=document.getElementById('folder'),profile=document.getElementById('profile'),start=document.getElementById('start'),cancel=document.getElementById('cancel'),bar=document.getElementById('progress'),statusEl=document.getElementById('status'),grid=document.getElementById('grid'),roundEl=document.getElementById('round'),summaryEl=document.getElementById('summary');
 const groupPanel=document.getElementById('groupPanel'),groupList=document.getElementById('groupList');let groupsData=[];
+const settingsPanel=document.getElementById('settingsPanel'),pluginList=document.getElementById('pluginList');
 const escapeHTML=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 async function loadCandidates(){const d=await(await fetch('/api/candidates')).json();folder.value=d.folder;roundEl.textContent=`第 ${d.round} 轮`;summaryEl.textContent=`累计保留 ${d.summary.keep} · 淘汰 ${d.summary.reject}`;render(d.candidates)}
 async function loadProfiles(){const d=await(await fetch('/api/profiles')).json();profile.innerHTML=d.profiles.map(p=>`<option value="${p.id}">${escapeHTML(p.name)}</option>`).join('');profile.value=d.active_profile}
@@ -702,7 +820,7 @@ function polygon(values,radius){return values.map((value,i)=>{const angle=-Math.
 function radar(metrics){const values=axes.map(axis=>Math.round(axis[1](metrics)));const grids=[25,50,75,100].map(level=>`<polygon class="gridline" points="${polygon(Array(6).fill(level),72)}"/>`).join('');const lines=axes.map((_,i)=>{const a=-Math.PI/2+i*Math.PI/3;return `<line class="axis" x1="110" y1="100" x2="${110+Math.cos(a)*72}" y2="${100+Math.sin(a)*72}"/>`}).join('');const labels=axes.map((axis,i)=>{const a=-Math.PI/2+i*Math.PI/3,x=110+Math.cos(a)*91,y=104+Math.sin(a)*86;return `<text x="${x}" y="${y}" text-anchor="middle">${axis[0]} ${values[i]}</text>`}).join('');return `<svg class="radar" viewBox="0 0 220 200" role="img" aria-label="六项照片评分"><title>六项照片评分</title>${grids}${lines}<polygon class="shape" points="${polygon(values,72)}"/>${labels}</svg>`}
 const explanations={清晰:'主体细节清楚，焦点表现较可靠。',曝光:'整体曝光均衡，中间调保留自然。',动态范围:'高光和暗部保留完整，后期调整空间较大。',对比:'明暗层次清楚，画面结构比较突出。',色彩:'色彩关系协调，整体观感较自然。',构图:'视觉信息集中，画面边缘干扰较少。'};
 function reason(metrics){const best=axes.map(axis=>[axis[0],axis[1](metrics)]).sort((a,b)=>b[1]-a[1]).slice(0,2);return best.map(item=>explanations[item[0]]).join(' ')}
-function evidence(criteria){return `<div class="evidence">${(criteria||[]).filter(c=>c.id.startsWith('raw.')||c.id.endsWith('horizon')||c.id.endsWith('edge_integrity')).map(c=>`<span class="${c.score===null?'unknown':''}">${c.label} ${typeof c.value==='number'?Math.round(c.value):'未知'}${c.group_percentile?` · 组内 P${c.group_percentile}`:''}</span>`).join('')}</div>`}
+function evidence(criteria){return `<div class="evidence">${(criteria||[]).filter(c=>c.id.startsWith('raw.')||c.id.startsWith('subject.')||c.id.startsWith('depth.')||c.id.startsWith('timing.')||c.id.endsWith('horizon')||c.id.endsWith('edge_integrity')).map(c=>`<span class="${c.score===null?'unknown':''}">${c.label} ${typeof c.value==='number'?Math.round(c.value):'未知'}${c.group_percentile?` · 组内 P${c.group_percentile}`:''}</span>`).join('')}</div>`}
 function render(items){grid.innerHTML=items.map((p,i)=>{const name=escapeHTML(p.path.split('/').pop());return `<article class="card ${p.kept?'kept':''}"><div class="rank">#${i+1}</div><div class="photo-wrap"><img src="${p.thumbnail}" alt="${name}"><button class="rotate" title="顺时针旋转 90°" aria-label="旋转 ${name}" data-path="${encodeURIComponent(p.path)}" data-rotate="true">↻ 旋转 90°</button></div><div class="body"><div class="eyebrow">Top recommendation</div><div class="title-row"><div class="name">${name}</div></div><div class="score"><span>个人推荐<strong>${p.recommendation_score}</strong></span><span>客观质量<strong>${p.keep_score}</strong></span></div><div class="reason">${reason(p.metrics)}</div>${evidence(p.criteria)}${radar(p.metrics)}<div class="actions"><button class="keep" data-path="${encodeURIComponent(p.path)}" data-choice="keep">✓ 保留</button><button class="reject" data-path="${encodeURIComponent(p.path)}" data-choice="reject">淘汰</button></div>${p.kept?'<div class="badge">已加入本轮候选</div>':''}</div></article>`}).join('')}
 grid.onclick=async e=>{const pathValue=e.target.dataset.path;if(!pathValue)return;const path=decodeURIComponent(pathValue);if(e.target.dataset.rotate){e.target.disabled=true;const d=await(await fetch('/api/rotation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})})).json();if(d.ok){render(d.candidates);statusEl.textContent=`预览已旋转 ${d.degrees}°`}return}const choice=e.target.dataset.choice;if(!choice)return;e.target.disabled=true;const before=roundEl.textContent;const d=await(await fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path,choice})})).json();if(d.ok){roundEl.textContent=`第 ${d.round} 轮`;summaryEl.textContent=`累计保留 ${d.summary.keep} · 淘汰 ${d.summary.reject}`;render(d.candidates);statusEl.textContent=before!==roundEl.textContent?'已选满 5 张，偏好模型已更新并生成新一轮':'偏好模型已更新'}};
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -714,5 +832,8 @@ async function loadGroups(){const d=await(await fetch('/api/groups')).json();gro
 document.getElementById('groupsButton').onclick=loadGroups;document.getElementById('closeGroups').onclick=()=>groupPanel.classList.remove('open');document.getElementById('groupZoom').oninput=e=>groupPanel.style.setProperty('--group-zoom',e.target.value);
 groupList.onclick=async e=>{if(e.target.dataset.groupDecision){await fetch('/api/group-feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group_id:e.target.dataset.feedbackGroup,photo_id:e.target.dataset.photo,decision:e.target.dataset.groupDecision,reason_criteria:['group_comparison']})});await loadGroups();return}const id=e.target.dataset.split;if(!id)return;const article=e.target.closest('[data-group]'),selected=[...article.querySelectorAll('[data-member]:checked')].map(x=>x.dataset.member),all=[...article.querySelectorAll('[data-member]')].map(x=>x.dataset.member),rest=all.filter(x=>!selected.includes(x));if(!selected.length||!rest.length){statusEl.textContent='请勾选要拆出的照片';return}await fetch('/api/groups/correct',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_group_ids:[id],partitions:[selected,rest],type:'related'})});await loadGroups()};
 document.getElementById('mergeGroups').onclick=async()=>{const selected=[...groupList.querySelectorAll('[data-select-group]:checked')].map(x=>x.closest('[data-group]').dataset.group);if(selected.length<2){statusEl.textContent='请至少选择两个组';return}const members=groupsData.filter(g=>selected.includes(g.id)).flatMap(g=>g.members.map(m=>m.id));await fetch('/api/groups/correct',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_group_ids:selected,partitions:[members],type:'related'})});await loadGroups()};
+async function loadPlugins(){const [d,pd]=await Promise.all([fetch('/api/plugins').then(r=>r.json()),fetch('/api/profiles').then(r=>r.json())]);pluginList.innerHTML=d.plugins.map(p=>`<label class="plugin-card"><input type="checkbox" data-plugin="${p.id}" ${p.enabled?'checked':''} ${p.id==='builtin.objective'||p.availability!=='ready'?'disabled':''}><div><strong>${escapeHTML(p.name)}</strong><p>${escapeHTML(p.description)}</p><div class="plugin-meta"><span>${p.runtime_cost}</span><span>${p.download_size_mb?p.download_size_mb+' MB':'无需下载'}</span><span>${escapeHTML(p.privacy)}</span></div>${p.availability!=='ready'?`<div class="unavailable">未安装 · ${escapeHTML(p.install_hint||p.unavailable_reason)}</div>`:''}</div><span>${p.criteria.length} 项</span></label>`).join('');const custom=pd.profiles.find(p=>p.id==='custom');document.getElementById('customEditor').innerHTML=`<h3>Custom Profile 权重</h3><div class="weight-grid">${Object.entries(custom.weights).map(([key,value])=>`<label class="weight-row"><span>${escapeHTML(key)}</span><input type="number" min="0" max="1" step=".01" value="${value}" data-weight="${key}"></label>`).join('')}</div><button id="saveWeights">保存 Custom 权重</button>`;document.getElementById('saveWeights').onclick=saveCustomWeights;settingsPanel.classList.add('open')}
+async function saveCustomWeights(){const weights=Object.fromEntries([...document.querySelectorAll('[data-weight]')].map(input=>[input.dataset.weight,Number(input.value)]));const d=await(await fetch('/api/profile/custom',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({weights})})).json();statusEl.textContent=d.ok?'Custom 权重已保存并重新排序':d.error}
+document.getElementById('settingsButton').onclick=loadPlugins;document.getElementById('closeSettings').onclick=()=>settingsPanel.classList.remove('open');pluginList.onchange=async e=>{const id=e.target.dataset.plugin;if(!id)return;e.target.disabled=true;const d=await(await fetch('/api/plugin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plugin_id:id,enabled:e.target.checked})})).json();statusEl.textContent=d.ok?(e.target.checked?'标准已启用，点击“生成 Top 5”补充分析':'标准已关闭'):d.error;if(!d.ok)e.target.checked=!e.target.checked;e.target.disabled=false};
 loadProfiles();loadCandidates();
 </script></html>"""

@@ -8,6 +8,7 @@ from .criteria import (
     CriterionKind,
     CriterionResult,
     PhotoInput,
+    PluginManifest,
     RuntimeEnvironment,
 )
 from .metadata import PhotoMetadata
@@ -31,6 +32,12 @@ METRIC_LABELS = {
 class BuiltinObjectivePlugin:
     id = "builtin.objective"
     version = "4.0.0"
+    manifest = PluginManifest(
+        "基础客观质量",
+        "清晰度、曝光、高光、阴影、对比度、噪声、色彩、地平线与边缘完整性。",
+        0,
+        CriterionCost.CHEAP,
+    )
     criteria = tuple(
         CriterionDefinition(
             f"objective.{key}", label, CriterionKind.SOFT_WEIGHT, cost=CriterionCost.CHEAP

@@ -13,7 +13,7 @@ from .models import Metrics, Result
 ANALYZER_ID = "builtin.objective"
 ANALYZER_VERSION = "4"
 SAMPLE_SIZE = 64 * 1024
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _now() -> str:
@@ -138,6 +138,15 @@ class Catalog:
                 """
             )
             self.connection.execute("PRAGMA user_version = 4")
+            version = 4
+        if version < 5:
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS plugin_settings (
+                plugin_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+                )"""
+            )
+            self.connection.execute("PRAGMA user_version = 5")
         self.connection.commit()
 
     def prune_missing(self) -> int:
@@ -310,11 +319,14 @@ class Catalog:
         rows = self.connection.execute(
             """SELECT cr.*, cd.definition_json FROM criterion_results cr
             JOIN criterion_definitions cd ON cd.id = cr.criterion_id
-            WHERE cr.photo_id = ? AND cr.analyzer_version = ?
-            ORDER BY cr.criterion_id""",
-            (photo["id"], "4.0.0"),
+            WHERE cr.photo_id = ? ORDER BY cr.criterion_id, cr.computed_at DESC""",
+            (photo["id"],),
         ).fetchall()
+        seen: set[str] = set()
         for row in rows:
+            if row["criterion_id"] in seen:
+                continue
+            seen.add(row["criterion_id"])
             percentile = None
             if group and row["normalized_score"] is not None:
                 peers = self.connection.execute(
@@ -322,7 +334,7 @@ class Catalog:
                     JOIN group_members gm ON gm.photo_id = cr.photo_id
                     WHERE gm.group_id = ? AND cr.criterion_id = ?
                     AND cr.analyzer_version = ? AND cr.normalized_score IS NOT NULL""",
-                    (group["group_id"], row["criterion_id"], "4.0.0"),
+                    (group["group_id"], row["criterion_id"], row["analyzer_version"]),
                 ).fetchall()
                 percentile = round(
                     100
@@ -342,6 +354,83 @@ class Catalog:
                 }
             )
         return output
+
+    def plugin_settings(self) -> dict[str, bool]:
+        return {
+            row["plugin_id"]: bool(row["enabled"])
+            for row in self.connection.execute("SELECT * FROM plugin_settings")
+        }
+
+    def set_plugin_enabled(self, plugin_id: str, enabled: bool) -> None:
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO plugin_settings(plugin_id, enabled, updated_at)
+                VALUES (?, ?, ?) ON CONFLICT(plugin_id) DO UPDATE SET
+                enabled=excluded.enabled, updated_at=excluded.updated_at""",
+                (plugin_id, int(enabled), _now()),
+            )
+
+    def has_plugin_results(self, path: Path, plugin: object) -> bool:
+        criterion_ids = [criterion.id for criterion in plugin.criteria]
+        if not criterion_ids:
+            return True
+        placeholders = ",".join("?" for _ in criterion_ids)
+        row = self.connection.execute(
+            f"""SELECT count(DISTINCT cr.criterion_id) AS count
+            FROM criterion_results cr JOIN photos p ON p.id = cr.photo_id
+            WHERE p.path = ? AND cr.analyzer_version = ?
+            AND cr.criterion_id IN ({placeholders})""",
+            (str(path), plugin.version, *criterion_ids),
+        ).fetchone()
+        return row["count"] == len(criterion_ids)
+
+    def store_plugin_results(
+        self,
+        path: Path,
+        plugin: object,
+        results: list[CriterionResult],
+    ) -> None:
+        photo = self.connection.execute(
+            "SELECT id FROM photos WHERE path = ?", (str(path),)
+        ).fetchone()
+        if not photo:
+            return
+        now = _now()
+        with self.connection:
+            for definition in plugin.criteria:
+                self.connection.execute(
+                    """INSERT INTO criterion_definitions
+                    (id, definition_json, analyzer_id, analyzer_version) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET definition_json=excluded.definition_json,
+                    analyzer_id=excluded.analyzer_id, analyzer_version=excluded.analyzer_version""",
+                    (
+                        definition.id,
+                        json.dumps(asdict(definition)),
+                        plugin.id,
+                        plugin.version,
+                    ),
+                )
+            for criterion in results:
+                self.connection.execute(
+                    """INSERT INTO criterion_results
+                    (photo_id, criterion_id, value_json, normalized_score, confidence,
+                    evidence_json, analyzer_version, computed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(photo_id, criterion_id, analyzer_version) DO UPDATE SET
+                    value_json=excluded.value_json, normalized_score=excluded.normalized_score,
+                    confidence=excluded.confidence, evidence_json=excluded.evidence_json,
+                    computed_at=excluded.computed_at""",
+                    (
+                        photo["id"],
+                        criterion.criterion_id,
+                        json.dumps(criterion.value),
+                        criterion.normalized_score,
+                        criterion.confidence,
+                        json.dumps(criterion.evidence),
+                        criterion.analyzer_version,
+                        now,
+                    ),
+                )
 
     def update_metadata_and_criteria(
         self, path: Path, metadata: PhotoMetadata, criteria: list[CriterionResult]
