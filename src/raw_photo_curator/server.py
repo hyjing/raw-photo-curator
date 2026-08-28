@@ -1,12 +1,13 @@
 import json
 import mimetypes
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
+from threading import Event, Lock, Thread
 from urllib.parse import parse_qs, urlparse
 
 from PIL import Image
@@ -33,6 +34,10 @@ class SessionState:
     cache_hits: int = 0
     cache_misses: int = 0
     cache_failed: int = 0
+    cache_deleted: int = 0
+    progress_error: str = ""
+    cancel_event: Event = field(default_factory=Event)
+    job_lock: Lock = field(default_factory=Lock)
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -177,6 +182,8 @@ def make_handler(state: SessionState, database: Path):
                     "cache_hits": state.cache_hits,
                     "cache_misses": state.cache_misses,
                     "failed": state.cache_failed,
+                    "deleted": state.cache_deleted,
+                    "error": state.progress_error,
                 })
             elif route == "/api/candidates":
                 self._json({
@@ -218,6 +225,10 @@ def make_handler(state: SessionState, database: Path):
                 return
             if route == "/api/recommendations":
                 self._build_recommendations()
+                return
+            if route == "/api/cancel":
+                state.cancel_event.set()
+                self._json({"ok": True, "running": state.progress_running})
                 return
             if route == "/api/rotation":
                 self._rotate_photo()
@@ -293,17 +304,33 @@ def make_handler(state: SessionState, database: Path):
             self._json({"ok": True, "added": len(additions), "count": len(state.results)})
 
         def _build_recommendations(self) -> None:
-            size = int(self.headers.get("Content-Length", "0"))
-            if size:
-                data = json.loads(self.rfile.read(min(size, 16_384)))
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(min(size, 16_384))) if size else {}
                 requested = Path(str(data.get("folder", state.folder))).expanduser().resolve()
                 if not requested.is_dir():
                     self._json({"ok": False, "error": "文件夹不存在"}, HTTPStatus.BAD_REQUEST)
                     return
-                state.folder = requested
-            state.progress_running = True
-            state.progress_stage = "scanning"
+                with state.job_lock:
+                    if state.progress_running:
+                        self._json(
+                            {"ok": False, "error": "已有分析任务正在运行"},
+                            HTTPStatus.CONFLICT,
+                        )
+                        return
+                    state.folder = requested
+                    state.progress_running = True
+                    state.progress_stage = "scanning"
+                    state.progress_current = 0
+                    state.progress_total = 0
+                    state.progress_error = ""
+                    state.cancel_event.clear()
+                Thread(target=self._run_analysis_job, daemon=True).start()
+                self._json({"ok": True, "accepted": True}, HTTPStatus.ACCEPTED)
+            except (ValueError, json.JSONDecodeError):
+                self._json({"ok": False, "error": "无效请求"}, HTTPStatus.BAD_REQUEST)
 
+        def _run_analysis_job(self) -> None:
             def update_progress(current: int, total: int) -> None:
                 state.progress_current = current
                 state.progress_total = total
@@ -312,11 +339,21 @@ def make_handler(state: SessionState, database: Path):
                 state.cache_hits = values["hits"]
                 state.cache_misses = values["misses"]
                 state.cache_failed = values["failed"]
+                state.cache_deleted = values["deleted"]
 
             try:
                 all_results = state.analyzer(
-                    state.folder, state.output, None, 0, update_progress, update_stats
+                    state.folder,
+                    state.output,
+                    None,
+                    0,
+                    update_progress,
+                    update_stats,
+                    state.cancel_event.is_set,
                 )
+                if state.cancel_event.is_set():
+                    state.progress_stage = "cancelled"
+                    return
                 state.progress_stage = "ranking"
                 feedback = _read_feedback(database)
                 scores = recommendation_scores(all_results, feedback)
@@ -331,19 +368,12 @@ def make_handler(state: SessionState, database: Path):
                 state.round_number = 1
                 state.candidate_paths = []
                 _refresh_candidates(state, database)
-                self._json({
-                    "ok": True,
-                    "count": len(state.results),
-                    "feedback_count": len(feedback),
-                    "cache": {
-                        "hits": state.cache_hits,
-                        "misses": state.cache_misses,
-                        "failed": state.cache_failed,
-                    },
-                })
+                state.progress_stage = "done"
+            except Exception as exc:  # noqa: BLE001
+                state.progress_error = str(exc)
+                state.progress_stage = "failed"
             finally:
                 state.progress_running = False
-                state.progress_stage = "done"
 
         def _rotate_photo(self) -> None:
             try:
@@ -453,10 +483,10 @@ header{position:sticky;top:0;z-index:5;padding:18px 4vw 16px;border-bottom:1px s
 .controls{display:grid;grid-template-columns:minmax(280px,1fr) auto;gap:10px}.pathbox{display:flex;align-items:center;gap:9px;padding:0 13px;border:1px solid var(--line);border-radius:12px;background:#0d1016;transition:.2s}.pathbox:focus-within{border-color:#65d998;box-shadow:0 0 0 3px #65d99814}.pathbox span{color:#697181}input{width:100%;border:0;outline:0;background:transparent;color:var(--text);padding:12px 0}button{border:1px solid var(--line);background:#20252f;color:var(--text);border-radius:11px;padding:10px 14px;cursor:pointer;transition:.18s}button:hover{border-color:#4c5565;transform:translateY(-1px)}button:disabled{opacity:.5;cursor:default;transform:none}#start{background:var(--text);color:#0b0d11;border:0;font-weight:750;padding-inline:20px}.activity{display:flex;align-items:center;gap:12px;min-height:20px;margin-top:10px}progress{width:180px;height:5px;border:0;accent-color:var(--accent)}#status{color:var(--muted);font-size:12px}
 main{max-width:1540px;margin:auto;padding:28px 4vw 60px}.grid{display:grid;grid-template-columns:1fr;gap:26px}.card{position:relative;display:grid;grid-template-columns:minmax(0,1.8fr) minmax(350px,.82fr);background:linear-gradient(145deg,#171b23,#11141a);border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:0 18px 60px #0005}.card.kept{border-color:#56d88d;box-shadow:0 18px 60px #0005,0 0 0 1px #56d88d55}.rank{position:absolute;z-index:2;top:14px;left:14px;padding:7px 10px;border:1px solid #ffffff26;border-radius:10px;background:#07090ba8;backdrop-filter:blur(12px);font-weight:800}.photo-wrap{position:relative;display:grid;place-items:center;min-height:470px;background:linear-gradient(145deg,#08090c,#0e1116)}.card img{display:block;width:100%;height:100%;max-height:72vh;object-fit:contain}.body{display:flex;flex-direction:column;padding:23px}.eyebrow{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.title-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:5px}.name{font-size:18px;font-weight:750;overflow-wrap:anywhere}.rotate{position:absolute;z-index:2;top:14px;right:14px;padding:9px 13px;white-space:nowrap;background:#07090bc7;border-color:#ffffff2b;backdrop-filter:blur(12px);box-shadow:0 5px 18px #0006}.rotate:hover{background:#20252ee8}.score{display:flex;gap:9px;margin:16px 0 12px}.score span{display:flex;flex-direction:column;gap:2px;flex:1;padding:10px 12px;border:1px solid var(--line);border-radius:12px;color:var(--muted);font-size:11px;background:#0b0e13}.score strong{font-size:22px;color:var(--text);line-height:1.1}.reason{min-height:44px;color:#c8ccd4;line-height:1.55}.radar{display:block;width:100%;max-width:280px;margin:auto}.radar .gridline{fill:none;stroke:#343a46;stroke-width:1}.radar .axis{stroke:#2b303a}.radar .shape{fill:#72eca535;stroke:#72eca5;stroke-width:2}.radar text{fill:#aeb4bf;font:11px system-ui}.actions{display:grid;grid-template-columns:1.25fr 1fr;gap:9px;margin-top:auto;padding-top:14px}.actions button{font-weight:700}.keep{background:#22633e;border-color:#388d5b}.keep:hover{background:#2b784b}.reject{background:#302328;border-color:#5a343d;color:#ffc4c4}.reject:hover{background:#48282f}.badge{color:var(--accent);font-size:12px;margin-top:9px}
 @media(max-width:900px){header{position:relative}.card{grid-template-columns:1fr}.photo-wrap{min-height:0}.card img{max-height:none;aspect-ratio:3/2}.radar{max-width:250px}}@media(max-width:640px){.controls{grid-template-columns:1fr}.topline{align-items:flex-start}.meta{flex-direction:column}.card{border-radius:15px}.body{padding:18px}}
-</style><header><div class="topline"><div class="brand"><div class="mark">R</div><div><h1>RAW Photo Curator</h1><small>Local-first photo selection</small></div></div><div class="meta"><span class="chip" id="round">第 1 轮</span><span class="chip" id="summary">尚未选择</span></div></div><div class="controls"><label class="pathbox"><span>⌁</span><input id="folder" aria-label="本地照片文件夹" placeholder="输入包含 ARW / JPG 的照片文件夹"></label><button id="start">生成 Top 5</button></div><div class="activity"><progress id="progress" value="0" max="100" hidden></progress><span id="status">输入本地照片路径，分析结果只保存在这台设备</span></div></header>
+</style><header><div class="topline"><div class="brand"><div class="mark">R</div><div><h1>RAW Photo Curator</h1><small>Local-first photo selection</small></div></div><div class="meta"><span class="chip" id="round">第 1 轮</span><span class="chip" id="summary">尚未选择</span></div></div><div class="controls"><label class="pathbox"><span>⌁</span><input id="folder" aria-label="本地照片文件夹" placeholder="输入包含 ARW / JPG 的照片文件夹"></label><div><button id="cancel" hidden>取消</button> <button id="start">生成 Top 5</button></div></div><div class="activity"><progress id="progress" value="0" max="100" hidden></progress><span id="status">输入本地照片路径，分析结果只保存在这台设备</span></div></header>
 <main><div class="grid" id="grid"></div></main>
 <script>
-const folder=document.getElementById('folder'),start=document.getElementById('start'),bar=document.getElementById('progress'),statusEl=document.getElementById('status'),grid=document.getElementById('grid'),roundEl=document.getElementById('round'),summaryEl=document.getElementById('summary');
+const folder=document.getElementById('folder'),start=document.getElementById('start'),cancel=document.getElementById('cancel'),bar=document.getElementById('progress'),statusEl=document.getElementById('status'),grid=document.getElementById('grid'),roundEl=document.getElementById('round'),summaryEl=document.getElementById('summary');
 const escapeHTML=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 async function loadCandidates(){const d=await(await fetch('/api/candidates')).json();folder.value=d.folder;roundEl.textContent=`第 ${d.round} 轮`;summaryEl.textContent=`累计保留 ${d.summary.keep} · 淘汰 ${d.summary.reject}`;render(d.candidates)}
 const axes=[['清晰',m=>m.sharpness],['曝光',m=>m.exposure],['动态范围',m=>(m.highlights+m.shadows)/2],['对比',m=>m.contrast],['色彩',m=>(m.color+m.white_balance)/2],['构图',m=>m.composition]];
@@ -466,6 +496,9 @@ const explanations={清晰:'主体细节清楚，焦点表现较可靠。',曝�
 function reason(metrics){const best=axes.map(axis=>[axis[0],axis[1](metrics)]).sort((a,b)=>b[1]-a[1]).slice(0,2);return best.map(item=>explanations[item[0]]).join(' ')}
 function render(items){grid.innerHTML=items.map((p,i)=>{const name=escapeHTML(p.path.split('/').pop());return `<article class="card ${p.kept?'kept':''}"><div class="rank">#${i+1}</div><div class="photo-wrap"><img src="${p.thumbnail}" alt="${name}"><button class="rotate" title="顺时针旋转 90°" aria-label="旋转 ${name}" data-path="${encodeURIComponent(p.path)}" data-rotate="true">↻ 旋转 90°</button></div><div class="body"><div class="eyebrow">Top recommendation</div><div class="title-row"><div class="name">${name}</div></div><div class="score"><span>个人推荐<strong>${p.recommendation_score}</strong></span><span>客观质量<strong>${p.keep_score}</strong></span></div><div class="reason">${reason(p.metrics)}</div>${radar(p.metrics)}<div class="actions"><button class="keep" data-path="${encodeURIComponent(p.path)}" data-choice="keep">✓ 保留</button><button class="reject" data-path="${encodeURIComponent(p.path)}" data-choice="reject">淘汰</button></div>${p.kept?'<div class="badge">已加入本轮候选</div>':''}</div></article>`}).join('')}
 grid.onclick=async e=>{const pathValue=e.target.dataset.path;if(!pathValue)return;const path=decodeURIComponent(pathValue);if(e.target.dataset.rotate){e.target.disabled=true;const d=await(await fetch('/api/rotation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})})).json();if(d.ok){render(d.candidates);statusEl.textContent=`预览已旋转 ${d.degrees}°`}return}const choice=e.target.dataset.choice;if(!choice)return;e.target.disabled=true;const before=roundEl.textContent;const d=await(await fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path,choice})})).json();if(d.ok){roundEl.textContent=`第 ${d.round} 轮`;summaryEl.textContent=`累计保留 ${d.summary.keep} · 淘汰 ${d.summary.reject}`;render(d.candidates);statusEl.textContent=before!==roundEl.textContent?'已选满 5 张，偏好模型已更新并生成新一轮':'偏好模型已更新'}};
-start.onclick=async()=>{start.disabled=true;bar.hidden=false;bar.value=0;statusEl.textContent='正在建立本地照片索引…';const poll=setInterval(async()=>{const p=await(await fetch('/api/progress')).json();if(p.total){bar.value=p.current/p.total*100;statusEl.textContent=p.stage==='ranking'?'正在根据反馈生成 Top 5…':`正在分析 ${p.current} / ${p.total}（${Math.round(p.current/p.total*100)}%）`}},500);try{const d=await(await fetch('/api/recommendations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:folder.value})})).json();if(d.ok){await loadCandidates();const c=d.cache;statusEl.textContent=`已分析 ${d.count} 张 · 缓存 ${c.hits} · 新分析 ${c.misses}${c.failed?` · 跳过 ${c.failed}`:''}`}else statusEl.textContent=d.error||'分析失败'}finally{clearInterval(poll);bar.value=100;setTimeout(()=>bar.hidden=true,1000);start.disabled=false}};
+const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function followJob(){while(true){const p=await(await fetch('/api/progress')).json();if(p.total)bar.value=p.current/p.total*100;if(p.stage==='ranking')statusEl.textContent='正在根据反馈生成 Top 5…';else if(p.running)statusEl.textContent=`正在分析 ${p.current} / ${p.total}（${p.total?Math.round(p.current/p.total*100):0}%）`;if(!p.running){if(p.stage==='done'){await loadCandidates();statusEl.textContent=`已分析 ${p.total} 张 · 缓存 ${p.cache_hits} · 新分析 ${p.cache_misses}${p.failed?` · 跳过 ${p.failed}`:''}`}else if(p.stage==='cancelled')statusEl.textContent='已取消；下次会从缓存进度继续';else statusEl.textContent=p.error||'分析失败';break}await wait(350)}}
+start.onclick=async()=>{start.disabled=true;cancel.disabled=false;cancel.hidden=false;bar.hidden=false;bar.value=0;statusEl.textContent='正在建立本地照片索引…';try{const d=await(await fetch('/api/recommendations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:folder.value})})).json();if(d.ok)await followJob();else statusEl.textContent=d.error||'分析失败'}finally{bar.value=100;setTimeout(()=>bar.hidden=true,1000);cancel.hidden=true;start.disabled=false}};
+cancel.onclick=async()=>{cancel.disabled=true;await fetch('/api/cancel',{method:'POST'});statusEl.textContent='正在安全停止…'};
 loadCandidates();
 </script></html>"""
