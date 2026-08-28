@@ -355,6 +355,20 @@ class Catalog:
             )
         return output
 
+    def preference_contexts(self) -> dict[str, dict[str, object]]:
+        """Return stable model inputs keyed by path; catalog remains the source of truth."""
+        output: dict[str, dict[str, object]] = {}
+        for record in self.photo_records():
+            criteria = {
+                item["id"]: item for item in self.criteria_for_path(str(record["path"]))
+            }
+            output[str(record["path"])] = {
+                "metadata": record["metadata"],
+                "embedding": record["embedding"],
+                "criteria": criteria,
+            }
+        return output
+
     def plugin_settings(self) -> dict[str, bool]:
         return {
             row["plugin_id"]: bool(row["enabled"])

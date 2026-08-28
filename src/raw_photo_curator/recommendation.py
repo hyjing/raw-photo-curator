@@ -11,7 +11,8 @@ def _vector(result: Result) -> np.ndarray:
 
 
 def recommendation_scores(
-    results: list[Result], feedback: dict[str, dict], priors: dict[str, float] | None = None
+    results: list[Result], feedback: dict[str, dict], priors: dict[str, float] | None = None,
+    learned_scores: dict[str, float] | None = None, learned_alpha: float | None = None,
 ) -> dict[str, float]:
     positives: list[np.ndarray] = []
     negatives: list[np.ndarray] = []
@@ -24,20 +25,22 @@ def recommendation_scores(
 
     reviewed = len(positives) + len(negatives)
     alpha = min(0.40, reviewed / 30 * 0.40)
+    if learned_scores is not None:
+        alpha = max(0.0, min(0.40, learned_alpha or 0.0))
     positive_center = np.mean(positives, axis=0) if positives else None
     negative_center = np.mean(negatives, axis=0) if negatives else None
     dimension_scale = sqrt(len(astuple(results[0].metrics))) if results else 1.0
     output: dict[str, float] = {}
     for result in results:
         vector = _vector(result)
-        preference = 50.0
-        if positive_center is not None and negative_center is not None:
+        preference = learned_scores.get(str(result.path), 50.0) if learned_scores is not None else 50.0
+        if learned_scores is None and positive_center is not None and negative_center is not None:
             positive_distance = float(np.linalg.norm(vector - positive_center))
             negative_distance = float(np.linalg.norm(vector - negative_center))
             preference = 100 * negative_distance / max(0.001, positive_distance + negative_distance)
-        elif positive_center is not None:
+        elif learned_scores is None and positive_center is not None:
             preference = 100 * (1 - min(1.0, float(np.linalg.norm(vector - positive_center)) / dimension_scale))
-        elif negative_center is not None:
+        elif learned_scores is None and negative_center is not None:
             preference = 100 * min(1.0, float(np.linalg.norm(vector - negative_center)) / dimension_scale)
         prior = priors.get(str(result.path), result.keep_score) if priors else result.keep_score
         score = prior * (1 - alpha) + preference * alpha

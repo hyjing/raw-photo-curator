@@ -238,11 +238,17 @@ explicit_score = weighted_mean(enabled criterion scores with sufficient confiden
 - 组内相对差值
 - 当前 Profile 的历史反馈
 
-初始实现顺序：
+当前实现：
 
-1. regularized logistic regression
-2. pairwise linear ranker
-3. small RankNet/MLP，仅在基线不足时考虑
+1. 固定 71 维 feature schema：11 项技术指标、4 项可选标准、4 项组内百分位、4 项
+   归一化 EXIF 和 48 维冻结描述符
+2. 正负反馈组合为 pairwise difference，使用 L2 正则的线性 logistic ranker
+3. 每次反馈后在 CPU 重训，最多采样 512 对；不足 2 个正例和 2 个负例时不建立模型
+4. 模型按 Profile 以版本化 JSON 存入 `preference_models`；不兼容 schema 自动回退先验
+5. `learned_weight` 同时受反馈数量和 pairwise 一致率限制，范围为 0–40%
+
+Alaska 缓存基准中，读取 1,065 条缓存分析记录的模型上下文约 52 ms，20 条模拟反馈训练
+约 10 ms，全部预测约 8 ms；序列化模型约 1 KB。具体耗时随机器与缓存状态变化。
 
 ### Final group ranking
 
