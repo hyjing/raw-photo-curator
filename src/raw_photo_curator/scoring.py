@@ -19,8 +19,19 @@ def measure(rgb: np.ndarray) -> Metrics:
     highlights = _clamp(100 * (1 - np.mean(gray > 0.98) * 7))
     shadows = _clamp(100 * (1 - np.mean(gray < 0.02) * 7))
 
+    low, high = np.percentile(gray, (5, 95))
+    contrast = _clamp((high - low) * 125)
+    local_average = (
+        gray[:-2, 1:-1] + gray[2:, 1:-1] + gray[1:-1, :-2] + gray[1:-1, 2:]
+    ) / 4
+    residual = np.abs(gray[1:-1, 1:-1] - local_average)
+    quiet = residual[residual <= np.percentile(residual, 60)]
+    noise = _clamp(100 - float(quiet.mean()) * 900)
+
     saturation = rgb.max(axis=2) - rgb.min(axis=2)
     color = _clamp(45 + float(saturation.mean()) * 150 + float(saturation.std()) * 60)
+    channel_means = rgb.mean(axis=(0, 1))
+    white_balance = _clamp(100 - float(channel_means.max() - channel_means.min()) * 180)
 
     h, w = gray.shape
     center = gray[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
@@ -29,24 +40,34 @@ def measure(rgb: np.ndarray) -> Metrics:
     border_noise = float(np.std(border))
     composition = _clamp(58 + center_detail * 120 - max(0.0, border_noise - center_detail) * 80)
 
-    return Metrics(sharpness, exposure, highlights, shadows, color, composition)
+    return Metrics(
+        sharpness, exposure, highlights, shadows, contrast, noise,
+        color, white_balance, composition,
+    )
 
 
 def scores(m: Metrics, uniqueness: float = 100.0) -> tuple[float, float]:
     keep = (
-        m.sharpness * 0.30
-        + m.composition * 0.25
-        + m.exposure * 0.15
-        + ((m.highlights + m.shadows) / 2) * 0.15
+        m.sharpness * 0.22
+        + m.composition * 0.18
+        + m.exposure * 0.12
+        + m.highlights * 0.08
+        + m.shadows * 0.06
+        + m.contrast * 0.07
+        + m.noise * 0.07
         + m.color * 0.05
+        + m.white_balance * 0.05
         + uniqueness * 0.10
     )
     edit = (
         m.highlights * 0.25
-        + m.shadows * 0.25
-        + m.sharpness * 0.20
-        + m.composition * 0.15
-        + m.color * 0.15
+        + m.shadows * 0.20
+        + m.noise * 0.15
+        + m.sharpness * 0.15
+        + m.contrast * 0.10
+        + m.composition * 0.08
+        + m.color * 0.05
+        + m.white_balance * 0.02
     )
     return _clamp(keep), _clamp(edit)
 

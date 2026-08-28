@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .models import Result
+from .recommendation import recommendation_scores
 
 CHOICES = {"keep", "edit", "reject", "maybe", None}
 
@@ -40,8 +41,8 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 
 def _photo_payload(results: list[Result], database: Path) -> list[dict]:
-    with _connect(database) as connection:
-        saved = {row["path"]: dict(row) for row in connection.execute("SELECT * FROM feedback")}
+    saved = _read_feedback(database)
+    personalized = recommendation_scores(results, saved)
     payload = []
     for index, result in enumerate(results):
         item = result.to_dict()
@@ -52,8 +53,14 @@ def _photo_payload(results: list[Result], database: Path) -> list[dict]:
         if feedback:
             feedback["tags"] = json.loads(feedback["tags"])
         item["feedback"] = feedback
+        item["recommendation_score"] = personalized[str(result.path)]
         payload.append(item)
     return payload
+
+
+def _read_feedback(database: Path) -> dict[str, dict]:
+    with _connect(database) as connection:
+        return {row["path"]: dict(row) for row in connection.execute("SELECT * FROM feedback")}
 
 
 def _summary(database: Path, results: list[Result]) -> dict[str, int]:
@@ -118,6 +125,9 @@ def make_handler(state: SessionState, database: Path):
             if route == "/api/more":
                 self._load_more()
                 return
+            if route == "/api/recommendations":
+                self._build_recommendations()
+                return
             if route != "/api/feedback":
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
@@ -179,6 +189,24 @@ def make_handler(state: SessionState, database: Path):
             state.results.extend(additions)
             self._json({"ok": True, "added": len(additions), "count": len(state.results)})
 
+        def _build_recommendations(self) -> None:
+            all_results = state.analyzer(state.folder, state.output, None, 0)
+            feedback = _read_feedback(database)
+            scores = recommendation_scores(all_results, feedback)
+            reviewed_paths = set(feedback)
+            state.results = sorted(
+                all_results,
+                key=lambda result: (
+                    str(result.path) in reviewed_paths,
+                    -scores[str(result.path)],
+                ),
+            )
+            self._json({
+                "ok": True,
+                "count": len(state.results),
+                "feedback_count": len(feedback),
+            })
+
         def log_message(self, format: str, *args: object) -> None:
             return
 
@@ -217,9 +245,9 @@ aside{padding:20px;overflow:auto;border-left:1px solid #292b30}h1{font-size:18px
 .tags button{font-size:12px;padding:6px 8px}textarea{width:100%;background:#15171a;color:#eee;border:1px solid #3b3e44;border-radius:8px;padding:9px;resize:vertical}.nav{display:flex;justify-content:space-between;margin-top:16px}.hint{color:#73767d;font-size:12px;line-height:1.6;margin-top:16px}
 @media(max-width:800px){.layout{height:auto;grid-template-columns:1fr}.stage{height:55vh}aside{border-left:0}.path{display:none}}
 </style>
-<header><b>RAW Photo Curator</b><input id="folder" aria-label="本地照片文件夹"><button id="loadFolder">加载前 5 张</button><span id="folderStatus"></span><span id="position"></span><span id="summary">载入中…</span></header>
+<header><b>RAW Photo Curator</b><input id="folder" aria-label="本地照片文件夹"><button id="loadFolder">加载前 5 张</button><button id="recommend">生成推荐榜</button><span id="folderStatus"></span><span id="position"></span><span id="summary">载入中…</span></header>
 <div class="layout"><div class="stage"><img id="photo"></div><aside><h1 id="name"></h1><div class="path" id="path"></div>
-<div class="scores"><div class="score keep">保留分<strong id="keep"></strong></div><div class="score edit">调色潜力<strong id="edit"></strong></div></div>
+<div class="scores"><div class="score keep">客观保留分<strong id="keep"></strong></div><div class="score edit">个人推荐分<strong id="recommendScore"></strong></div><div class="score edit">调色潜力<strong id="edit"></strong></div></div>
 <div class="metrics" id="metrics"></div><div class="choices"><button data-choice="keep">P 保留</button><button class="edit" data-choice="edit">E 调色</button><button data-choice="maybe">M 待定</button><button class="reject" data-choice="reject">X 淘汰</button></div>
 <div>原因标签</div><div class="tags" id="tags"></div>
 <textarea id="note" rows="3" maxlength="300" placeholder="备注会自动保存"></textarea><div class="nav"><button id="prev">← 上一张</button><button id="next">下一张 →</button></div>
@@ -228,16 +256,17 @@ aside{padding:20px;overflow:auto;border-left:1px solid #292b30}h1{font-size:18px
 let photos=[], index=0, timer; const labels={sharpness:'清晰度',exposure:'曝光',highlights:'高光保留',shadows:'阴影保留',color:'色彩信息',composition:'构图代理'};
 const photoEl=document.getElementById('photo'), nameEl=document.getElementById('name'), pathEl=document.getElementById('path');
 const keepEl=document.getElementById('keep'), editEl=document.getElementById('edit'), positionEl=document.getElementById('position');
+const recommendScoreEl=document.getElementById('recommendScore');
 const metricsEl=document.getElementById('metrics'), tagsEl=document.getElementById('tags');
 const noteEl=document.getElementById('note'), summaryEl=document.getElementById('summary');
 const tagNames=['构图','光线','清晰度','表情','色彩','景深'];
 async function load(reset=true){const r=await fetch('/api/photos');const d=await r.json();photos=d.photos;if(reset)index=0;document.getElementById('folder').value=d.folder;showSummary(d.summary);render()}
 function current(){return photos[index]} function fb(){return current().feedback ||= {choice:null,tags:[],note:''}}
-function render(){const p=current();if(!p)return;photoEl.src=p.thumbnail;nameEl.textContent=p.path.split('/').pop();pathEl.textContent=p.path;keepEl.textContent=p.keep_score;editEl.textContent=p.edit_score;positionEl.textContent=`${index+1} / ${photos.length}`;
+function render(){const p=current();if(!p)return;photoEl.src=p.thumbnail;nameEl.textContent=p.path.split('/').pop();pathEl.textContent=p.path;keepEl.textContent=p.keep_score;recommendScoreEl.textContent=p.recommendation_score;editEl.textContent=p.edit_score;positionEl.textContent=`${index+1} / ${photos.length}`;
  metricsEl.innerHTML=Object.entries(p.metrics).map(([k,v])=>`<div class="metric"><span>${labels[k]}</span><b>${v}</b></div>`).join('');
  document.querySelectorAll('[data-choice]').forEach(b=>b.classList.toggle('active',b.dataset.choice===fb().choice));
  tagsEl.innerHTML=tagNames.map(t=>`<button data-tag="${t}" class="${fb().tags.includes(t)?'active':''}">${t}</button>`).join('');noteEl.value=fb().note||''}
-async function save(){const p=current(), f=fb();const r=await fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:p.id,...f})});const d=await r.json();if(d.ok)showSummary(d.summary)}
+async function save(){const p=current(), f=fb();const r=await fetch('/api/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:p.id,...f})});const d=await r.json();if(d.ok){showSummary(d.summary);document.getElementById('folderStatus').textContent='偏好模型已更新'}}
 function showSummary(s){summaryEl.textContent=`已评 ${s.reviewed} · 保留 ${s.keep} · 调色 ${s.edit} · 待定 ${s.maybe} · 淘汰 ${s.reject}`}
 function choose(c){fb().choice=fb().choice===c?null:c;render();save()} function move(n){index=Math.max(0,Math.min(photos.length-1,index+n));render()}
 async function moveNext(){if(index<photos.length-1){move(1);return}const status=document.getElementById('folderStatus');status.textContent='正在加载下一批…';const r=await fetch('/api/more',{method:'POST'});const d=await r.json();if(d.added){const oldLength=photos.length;await load(false);index=oldLength;render();status.textContent=`已加载 ${d.count} 张`}else{status.textContent='已经是最后一张'}}
@@ -247,5 +276,6 @@ noteEl.oninput=()=>{fb().note=noteEl.value;clearTimeout(timer);timer=setTimeout(
 document.getElementById('prev').onclick=()=>move(-1);
 document.getElementById('next').onclick=moveNext;
 document.getElementById('loadFolder').onclick=async()=>{const status=document.getElementById('folderStatus');status.textContent='正在分析…';const r=await fetch('/api/folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:document.getElementById('folder').value})});const d=await r.json();status.textContent=d.ok?`已加载 ${d.count} 张`:d.error;if(d.ok)await load()};
+document.getElementById('recommend').onclick=async()=>{const status=document.getElementById('folderStatus');status.textContent='正在分析全部照片并生成推荐…';const r=await fetch('/api/recommendations',{method:'POST'});const d=await r.json();if(d.ok){await load();status.textContent=`推荐榜已生成：${d.count} 张，基于 ${d.feedback_count} 条反馈`}else status.textContent='推荐生成失败'};
 document.onkeydown=e=>{if(e.target===noteEl||e.target.id==='folder')return;if(e.key==='ArrowRight')moveNext();if(e.key==='ArrowLeft')move(-1);if('pPeEmMxX'.includes(e.key))choose(({p:'keep',e:'edit',m:'maybe',x:'reject'})[e.key.toLowerCase()])};load();
 </script></html>"""

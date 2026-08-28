@@ -8,7 +8,10 @@ class Metrics:
     exposure: float
     highlights: float
     shadows: float
+    contrast: float
+    noise: float
     color: float
+    white_balance: float
     composition: float
 
 
@@ -25,4 +28,3 @@ class Result:
         data = asdict(self)
         data["path"] = str(self.path)
         return data
-

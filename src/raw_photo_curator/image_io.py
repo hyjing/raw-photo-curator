@@ -1,3 +1,4 @@
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -18,13 +19,20 @@ def load_preview(path: Path, max_size: int = 1600) -> Image.Image:
         except ImportError as exc:
             raise RuntimeError("读取 RAW 需要安装 rawpy：pip install rawpy") from exc
         with rawpy.imread(str(path)) as raw:
-            rgb = raw.postprocess(
-                use_camera_wb=True,
-                half_size=True,
-                no_auto_bright=True,
-                output_bps=8,
-            )
-        image = Image.fromarray(rgb, "RGB")
+            try:
+                thumbnail = raw.extract_thumb()
+                if thumbnail.format == rawpy.ThumbFormat.JPEG:
+                    image = Image.open(BytesIO(thumbnail.data)).convert("RGB")
+                else:
+                    image = Image.fromarray(thumbnail.data).convert("RGB")
+            except rawpy.LibRawError:
+                rgb = raw.postprocess(
+                    use_camera_wb=True,
+                    half_size=True,
+                    no_auto_bright=True,
+                    output_bps=8,
+                )
+                image = Image.fromarray(rgb, "RGB")
     else:
         with Image.open(path) as source:
             image = ImageOps.exif_transpose(source).convert("RGB")
@@ -34,4 +42,3 @@ def load_preview(path: Path, max_size: int = 1600) -> Image.Image:
 
 def as_array(image: Image.Image) -> np.ndarray:
     return np.asarray(image, dtype=np.float32) / 255.0
-
