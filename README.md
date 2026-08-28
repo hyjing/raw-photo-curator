@@ -8,6 +8,8 @@
 当前版本是可解释的 MVP，不上传照片，也不会删除或移动原片。支持 Sony ARW（通过
 LibRaw/rawpy）以及 JPEG、PNG、TIFF。
 
+项目方向和架构边界见 [ROADMAP.md](ROADMAP.md) 与 [DESIGN.md](DESIGN.md)。
+
 ## 安装
 
 需要 Python 3.10+：
