@@ -26,6 +26,14 @@ raw-curator analyze /path/to/photos --output reports/latest
 
 完成后打开 `reports/latest/index.html`。分析使用最长边 1600px 的预览，不修改原文件。
 
+推荐使用本地交互式工作台。每次评价会立即写入本地 SQLite：
+
+```bash
+raw-curator serve /path/to/photos --output reports/live
+```
+
+然后访问 `http://127.0.0.1:8765`。服务只监听本机，不会上传照片。
+
 ```bash
 raw-curator analyze /path/to/photos --output reports/latest --limit 50
 ```
@@ -45,4 +53,3 @@ raw-curator analyze /path/to/photos --output reports/latest --limit 50
 ## 隐私
 
 所有处理默认在本机完成。生成的报告只包含缩略图和分析数据。
-
