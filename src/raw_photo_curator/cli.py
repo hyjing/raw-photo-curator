@@ -1,10 +1,12 @@
 import argparse
+import json
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
 from .catalog import Catalog, fingerprint
 from .embedding import ColorGridEmbedding
+from .evaluation import grouping_metrics
 from .grouping import build_groups
 from .image_io import as_array, discover, load_preview
 from .metadata import extract_metadata, perceptual_hash
@@ -86,12 +88,24 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     command = sub.add_parser("analyze", help="分析照片文件夹并生成静态报告")
     live = sub.add_parser("serve", help="启动本地交互式选片工作台")
+    evaluation = sub.add_parser("evaluate-groups", help="使用本地人工标注评测分组")
     for item in (command, live):
         item.add_argument("folder", type=Path)
         item.add_argument("--output", type=Path, default=Path("reports/latest"))
         item.add_argument("--limit", type=int)
     live.add_argument("--port", type=int, default=8765)
+    evaluation.add_argument("catalog", type=Path)
+    evaluation.add_argument("labels", type=Path)
     args = parser.parse_args()
+    if args.command == "evaluate-groups":
+        labels = json.loads(args.labels.read_text())
+        with Catalog(args.catalog) as catalog:
+            predicted = [
+                [member["path"] for member in group["members"]]
+                for group in catalog.groups()
+            ]
+        print(json.dumps(grouping_metrics(predicted, labels["groups"]), indent=2))
+        return
     if not args.folder.is_dir():
         parser.error(f"照片文件夹不存在：{args.folder}")
     if args.command == "serve":

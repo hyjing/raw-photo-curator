@@ -50,6 +50,13 @@ raw-curator serve /path/to/photos --output reports/live
 “相似组”视图使用拍摄时间、相机序列、感知哈希和本地视觉描述符识别近似重复与连拍。
 组内照片支持同步缩放、最佳/淘汰反馈，以及持久化拆分和合并纠正。
 
+可以复制 `docs/group-labels.example.json` 建立本地人工分组标注，并报告 pairwise
+precision、recall 和 F1：
+
+```bash
+raw-curator evaluate-groups reports/live/catalog.sqlite3 my-group-labels.json
+```
+
 ```bash
 raw-curator analyze /path/to/photos --output reports/latest --limit 50
 ```
