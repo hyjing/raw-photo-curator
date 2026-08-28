@@ -4,7 +4,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .catalog import Catalog, fingerprint
+from .embedding import ColorGridEmbedding
+from .grouping import build_groups
 from .image_io import as_array, discover, load_preview
+from .metadata import extract_metadata, perceptual_hash
 from .models import Result
 from .report import write_report
 from .scoring import explain, measure, scores
@@ -32,6 +35,7 @@ def analyze(
     if progress:
         progress(0, len(paths))
     with Catalog(output / "catalog.sqlite3") as catalog:
+        embedder = ColorGridEmbedding()
         run_stats["deleted"] = catalog.prune_missing()
         for number, path in enumerate(paths, start=1):
             if cancelled and cancelled():
@@ -51,7 +55,13 @@ def analyze(
                     result = Result(
                         path, keep, edit, metrics, explain(metrics), f"thumbnails/{thumb_name}"
                     )
-                    catalog.store(result)
+                    catalog.store(
+                        result,
+                        extract_metadata(path),
+                        perceptual_hash(image),
+                        embedder.embed(image),
+                        f"{embedder.id}:{embedder.version}",
+                    )
                     results.append(result)
                     run_stats["misses"] += 1
             # A damaged/unsupported file should not abort a long folder scan.
@@ -61,6 +71,7 @@ def analyze(
             finally:
                 if progress:
                     progress(number, len(paths))
+        catalog.replace_automatic_groups(build_groups(catalog.photo_records()))
     if stats:
         stats(run_stats)
     print(

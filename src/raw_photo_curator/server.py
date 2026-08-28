@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 from PIL import Image
 
+from .catalog import Catalog
 from .models import Result
 from .profiles import BUILTIN_PROFILES, Profile, hard_rule_reasons, weighted_score
 from .recommendation import recommendation_scores
@@ -71,6 +72,13 @@ def _connect(path: Path) -> sqlite3.Connection:
     connection.execute(
         """CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY, value TEXT NOT NULL
+        )"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS group_feedback (
+        group_id TEXT NOT NULL, photo_id TEXT NOT NULL,
+        decision TEXT NOT NULL, reason_criteria TEXT NOT NULL DEFAULT '[]',
+        updated_at TEXT NOT NULL, PRIMARY KEY(group_id, photo_id)
         )"""
     )
     for profile in BUILTIN_PROFILES:
@@ -263,6 +271,28 @@ def make_handler(state: SessionState, database: Path):
                     "profiles": [profile.to_dict() for profile in _profiles(database)],
                     "active_profile": active.id,
                 })
+            elif route == "/api/groups":
+                with Catalog(state.output / "catalog.sqlite3") as catalog:
+                    groups = catalog.groups()
+                with _connect(database) as connection:
+                    group_feedback = {
+                        (row["group_id"], row["photo_id"]): row["decision"]
+                        for row in connection.execute("SELECT * FROM group_feedback")
+                    }
+                thumbnails = {
+                    str(result.path): f"/thumbnails/{Path(result.thumbnail).name}"
+                    for result in state.results
+                }
+                for group in groups:
+                    for member in group["members"]:
+                        thumbnail = thumbnails.get(member["path"])
+                        if not thumbnail and member.get("thumbnail"):
+                            thumbnail = f"/thumbnails/{Path(member['thumbnail']).name}"
+                        member["thumbnail"] = thumbnail
+                        member["decision"] = group_feedback.get(
+                            (group["id"], member["id"])
+                        )
+                self._json({"groups": groups})
             elif route.startswith("/thumbnails/"):
                 name = Path(route).name
                 candidate = state.output / "thumbnails" / name
@@ -303,6 +333,12 @@ def make_handler(state: SessionState, database: Path):
                 return
             if route == "/api/profile":
                 self._change_profile()
+                return
+            if route == "/api/groups/correct":
+                self._correct_groups()
+                return
+            if route == "/api/group-feedback":
+                self._save_group_feedback()
                 return
             if route == "/api/rotation":
                 self._rotate_photo()
@@ -501,6 +537,67 @@ def make_handler(state: SessionState, database: Path):
             except (ValueError, KeyError, json.JSONDecodeError):
                 self._json({"ok": False, "error": "invalid profile"}, HTTPStatus.BAD_REQUEST)
 
+        def _correct_groups(self) -> None:
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(min(size, 65_536)))
+                source_ids = [str(value) for value in data["source_group_ids"]]
+                partitions = [
+                    [str(photo_id) for photo_id in partition]
+                    for partition in data["partitions"]
+                ]
+                if not source_ids or not partitions:
+                    raise ValueError("empty correction")
+                with Catalog(state.output / "catalog.sqlite3") as catalog:
+                    known = {str(record["id"]) for record in catalog.photo_records()}
+                    requested = {photo_id for partition in partitions for photo_id in partition}
+                    if not requested <= known:
+                        raise ValueError("unknown photo")
+                    created = catalog.save_manual_partitions(
+                        source_ids, partitions, str(data.get("type", "related"))
+                    )
+                self._json({"ok": True, "created_group_ids": created})
+            except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+                self._json({"ok": False, "error": "invalid correction"}, HTTPStatus.BAD_REQUEST)
+
+        def _save_group_feedback(self) -> None:
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(min(size, 16_384)))
+                group_id, photo_id = str(data["group_id"]), str(data["photo_id"])
+                decision = str(data["decision"])
+                if decision not in {"winner", "reject"}:
+                    raise ValueError("invalid decision")
+                with Catalog(state.output / "catalog.sqlite3") as catalog:
+                    group = next(item for item in catalog.groups() if item["id"] == group_id)
+                    if photo_id not in {member["id"] for member in group["members"]}:
+                        raise ValueError("photo outside group")
+                reasons = data.get("reason_criteria", ["group_comparison"])
+                with _connect(database) as connection:
+                    if decision == "winner":
+                        connection.execute(
+                            "DELETE FROM group_feedback WHERE group_id = ? AND decision = 'winner'",
+                            (group_id,),
+                        )
+                    connection.execute(
+                        """INSERT INTO group_feedback
+                        (group_id, photo_id, decision, reason_criteria, updated_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(group_id, photo_id) DO UPDATE SET
+                        decision=excluded.decision, reason_criteria=excluded.reason_criteria,
+                        updated_at=excluded.updated_at""",
+                        (
+                            group_id,
+                            photo_id,
+                            decision,
+                            json.dumps(reasons),
+                            datetime.now(UTC).isoformat(),
+                        ),
+                    )
+                self._json({"ok": True})
+            except (ValueError, KeyError, StopIteration, json.JSONDecodeError):
+                self._json({"ok": False, "error": "invalid group feedback"}, HTTPStatus.BAD_REQUEST)
+
         def log_message(self, format: str, *args: object) -> None:
             return
 
@@ -584,10 +681,12 @@ header{position:sticky;top:0;z-index:5;padding:18px 4vw 16px;border-bottom:1px s
 .controls{display:grid;grid-template-columns:minmax(280px,1fr) auto auto;gap:10px}.pathbox{display:flex;align-items:center;gap:9px;padding:0 13px;border:1px solid var(--line);border-radius:12px;background:#0d1016;transition:.2s}.pathbox:focus-within{border-color:#65d998;box-shadow:0 0 0 3px #65d99814}.pathbox span{color:#697181}input{width:100%;border:0;outline:0;background:transparent;color:var(--text);padding:12px 0}select,button{border:1px solid var(--line);background:#20252f;color:var(--text);border-radius:11px;padding:10px 14px;cursor:pointer;transition:.18s}button:hover{border-color:#4c5565;transform:translateY(-1px)}button:disabled{opacity:.5;cursor:default;transform:none}#start{background:var(--text);color:#0b0d11;border:0;font-weight:750;padding-inline:20px}.activity{display:flex;align-items:center;gap:12px;min-height:20px;margin-top:10px}progress{width:180px;height:5px;border:0;accent-color:var(--accent)}#status{color:var(--muted);font-size:12px}
 main{max-width:1540px;margin:auto;padding:28px 4vw 60px}.grid{display:grid;grid-template-columns:1fr;gap:26px}.card{position:relative;display:grid;grid-template-columns:minmax(0,1.8fr) minmax(350px,.82fr);background:linear-gradient(145deg,#171b23,#11141a);border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:0 18px 60px #0005}.card.kept{border-color:#56d88d;box-shadow:0 18px 60px #0005,0 0 0 1px #56d88d55}.rank{position:absolute;z-index:2;top:14px;left:14px;padding:7px 10px;border:1px solid #ffffff26;border-radius:10px;background:#07090ba8;backdrop-filter:blur(12px);font-weight:800}.photo-wrap{position:relative;display:grid;place-items:center;min-height:470px;background:linear-gradient(145deg,#08090c,#0e1116)}.card img{display:block;width:100%;height:100%;max-height:72vh;object-fit:contain}.body{display:flex;flex-direction:column;padding:23px}.eyebrow{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.title-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:5px}.name{font-size:18px;font-weight:750;overflow-wrap:anywhere}.rotate{position:absolute;z-index:2;top:14px;right:14px;padding:9px 13px;white-space:nowrap;background:#07090bc7;border-color:#ffffff2b;backdrop-filter:blur(12px);box-shadow:0 5px 18px #0006}.rotate:hover{background:#20252ee8}.score{display:flex;gap:9px;margin:16px 0 12px}.score span{display:flex;flex-direction:column;gap:2px;flex:1;padding:10px 12px;border:1px solid var(--line);border-radius:12px;color:var(--muted);font-size:11px;background:#0b0e13}.score strong{font-size:22px;color:var(--text);line-height:1.1}.reason{min-height:44px;color:#c8ccd4;line-height:1.55}.radar{display:block;width:100%;max-width:280px;margin:auto}.radar .gridline{fill:none;stroke:#343a46;stroke-width:1}.radar .axis{stroke:#2b303a}.radar .shape{fill:#72eca535;stroke:#72eca5;stroke-width:2}.radar text{fill:#aeb4bf;font:11px system-ui}.actions{display:grid;grid-template-columns:1.25fr 1fr;gap:9px;margin-top:auto;padding-top:14px}.actions button{font-weight:700}.keep{background:#22633e;border-color:#388d5b}.keep:hover{background:#2b784b}.reject{background:#302328;border-color:#5a343d;color:#ffc4c4}.reject:hover{background:#48282f}.badge{color:var(--accent);font-size:12px;margin-top:9px}
 @media(max-width:900px){header{position:relative}.card{grid-template-columns:1fr}.photo-wrap{min-height:0}.card img{max-height:none;aspect-ratio:3/2}.radar{max-width:250px}}@media(max-width:640px){.controls{grid-template-columns:1fr}.topline{align-items:flex-start}.meta{flex-direction:column}.card{border-radius:15px}.body{padding:18px}}
-</style><header><div class="topline"><div class="brand"><div class="mark">R</div><div><h1>RAW Photo Curator</h1><small>Local-first photo selection</small></div></div><div class="meta"><span class="chip" id="round">第 1 轮</span><span class="chip" id="summary">尚未选择</span></div></div><div class="controls"><label class="pathbox"><span>⌁</span><input id="folder" aria-label="本地照片文件夹" placeholder="输入包含 ARW / JPG 的照片文件夹"></label><select id="profile" aria-label="选片标准"></select><div><button id="cancel" hidden>取消</button> <button id="start">生成 Top 5</button></div></div><div class="activity"><progress id="progress" value="0" max="100" hidden></progress><span id="status">输入本地照片路径，分析结果只保存在这台设备</span></div></header>
-<main><div class="grid" id="grid"></div></main>
+.group-panel{position:fixed;inset:0;z-index:20;display:none;background:#07090be8;backdrop-filter:blur(16px);overflow:auto;padding:24px 4vw 60px}.group-panel.open{display:block}.group-toolbar{position:sticky;top:0;z-index:3;display:flex;align-items:center;gap:12px;padding:12px 0 18px;background:#07090be8}.group-toolbar h2{margin:0 auto 0 0}.group-list{display:grid;gap:22px}.similarity-group{padding:18px;border:1px solid var(--line);border-radius:18px;background:var(--surface)}.group-head{display:flex;gap:10px;align-items:center;margin-bottom:13px}.group-head strong{margin-right:auto}.member-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.member{position:relative;overflow:hidden;border-radius:12px;background:#050608;aspect-ratio:3/2}.member img{width:100%;height:100%;object-fit:contain;transform:scale(var(--group-zoom,1));transition:transform .15s}.member label{position:absolute;left:8px;bottom:8px;padding:5px 8px;border-radius:8px;background:#050608cc;font-size:11px}.member input{width:auto}.member-actions{position:absolute;display:flex;gap:5px;right:7px;top:7px}.member-actions button{padding:5px 7px;font-size:11px;background:#080a0dcc}.member-actions .chosen{border-color:var(--accent);color:var(--accent)}.split{margin-top:12px}
+</style><header><div class="topline"><div class="brand"><div class="mark">R</div><div><h1>RAW Photo Curator</h1><small>Local-first photo selection</small></div></div><div class="meta"><span class="chip" id="round">第 1 轮</span><span class="chip" id="summary">尚未选择</span></div></div><div class="controls"><label class="pathbox"><span>⌁</span><input id="folder" aria-label="本地照片文件夹" placeholder="输入包含 ARW / JPG 的照片文件夹"></label><select id="profile" aria-label="选片标准"></select><div><button id="groupsButton">相似组</button> <button id="cancel" hidden>取消</button> <button id="start">生成 Top 5</button></div></div><div class="activity"><progress id="progress" value="0" max="100" hidden></progress><span id="status">输入本地照片路径，分析结果只保存在这台设备</span></div></header>
+<main><div class="grid" id="grid"></div></main><section class="group-panel" id="groupPanel"><div class="group-toolbar"><h2>相似照片与连拍组</h2><label>同步缩放 <input id="groupZoom" type="range" min="1" max="3" step=".1" value="1"></label><button id="mergeGroups">合并选中组</button><button id="closeGroups">关闭</button></div><div class="group-list" id="groupList"></div></section>
 <script>
 const folder=document.getElementById('folder'),profile=document.getElementById('profile'),start=document.getElementById('start'),cancel=document.getElementById('cancel'),bar=document.getElementById('progress'),statusEl=document.getElementById('status'),grid=document.getElementById('grid'),roundEl=document.getElementById('round'),summaryEl=document.getElementById('summary');
+const groupPanel=document.getElementById('groupPanel'),groupList=document.getElementById('groupList');let groupsData=[];
 const escapeHTML=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 async function loadCandidates(){const d=await(await fetch('/api/candidates')).json();folder.value=d.folder;roundEl.textContent=`第 ${d.round} 轮`;summaryEl.textContent=`累计保留 ${d.summary.keep} · 淘汰 ${d.summary.reject}`;render(d.candidates)}
 async function loadProfiles(){const d=await(await fetch('/api/profiles')).json();profile.innerHTML=d.profiles.map(p=>`<option value="${p.id}">${escapeHTML(p.name)}</option>`).join('');profile.value=d.active_profile}
@@ -603,5 +702,9 @@ async function followJob(){while(true){const p=await(await fetch('/api/progress'
 start.onclick=async()=>{start.disabled=true;cancel.disabled=false;cancel.hidden=false;bar.hidden=false;bar.value=0;statusEl.textContent='正在建立本地照片索引…';try{const d=await(await fetch('/api/recommendations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:folder.value})})).json();if(d.ok)await followJob();else statusEl.textContent=d.error||'分析失败'}finally{bar.value=100;setTimeout(()=>bar.hidden=true,1000);cancel.hidden=true;start.disabled=false}};
 cancel.onclick=async()=>{cancel.disabled=true;await fetch('/api/cancel',{method:'POST'});statusEl.textContent='正在安全停止…'};
 profile.onchange=async()=>{profile.disabled=true;const d=await(await fetch('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile_id:profile.value})})).json();if(d.ok){render(d.candidates);statusEl.textContent=`已切换到 ${profile.options[profile.selectedIndex].text} 标准并重新排序`}profile.disabled=false};
+async function loadGroups(){const d=await(await fetch('/api/groups')).json();groupsData=d.groups;groupList.innerHTML=groupsData.map(g=>`<article class="similarity-group" data-group="${g.id}"><div class="group-head"><input type="checkbox" data-select-group><strong>${g.type==='duplicate'?'近似重复':'连拍'} · ${g.members.length} 张</strong><span>置信度 ${Math.round(g.confidence*100)}%</span>${g.manually_corrected?'<span class="badge">人工纠正</span>':''}</div><div class="member-grid">${g.members.map(m=>`<div class="member"><img src="${m.thumbnail||''}" alt="${escapeHTML(m.path.split('/').pop())}"><div class="member-actions"><button class="${m.decision==='winner'?'chosen':''}" data-group-decision="winner" data-photo="${m.id}" data-feedback-group="${g.id}">最佳</button><button class="${m.decision==='reject'?'chosen':''}" data-group-decision="reject" data-photo="${m.id}" data-feedback-group="${g.id}">淘汰</button></div><label><input type="checkbox" data-member="${m.id}"> ${escapeHTML(m.path.split('/').pop())}</label></div>`).join('')}</div><button class="split" data-split="${g.id}">把勾选照片拆成新组</button></article>`).join('');groupPanel.classList.add('open')}
+document.getElementById('groupsButton').onclick=loadGroups;document.getElementById('closeGroups').onclick=()=>groupPanel.classList.remove('open');document.getElementById('groupZoom').oninput=e=>groupPanel.style.setProperty('--group-zoom',e.target.value);
+groupList.onclick=async e=>{if(e.target.dataset.groupDecision){await fetch('/api/group-feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group_id:e.target.dataset.feedbackGroup,photo_id:e.target.dataset.photo,decision:e.target.dataset.groupDecision,reason_criteria:['group_comparison']})});await loadGroups();return}const id=e.target.dataset.split;if(!id)return;const article=e.target.closest('[data-group]'),selected=[...article.querySelectorAll('[data-member]:checked')].map(x=>x.dataset.member),all=[...article.querySelectorAll('[data-member]')].map(x=>x.dataset.member),rest=all.filter(x=>!selected.includes(x));if(!selected.length||!rest.length){statusEl.textContent='请勾选要拆出的照片';return}await fetch('/api/groups/correct',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_group_ids:[id],partitions:[selected,rest],type:'related'})});await loadGroups()};
+document.getElementById('mergeGroups').onclick=async()=>{const selected=[...groupList.querySelectorAll('[data-select-group]:checked')].map(x=>x.closest('[data-group]').dataset.group);if(selected.length<2){statusEl.textContent='请至少选择两个组';return}const members=groupsData.filter(g=>selected.includes(g.id)).flatMap(g=>g.members.map(m=>m.id));await fetch('/api/groups/correct',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_group_ids:selected,partitions:[members],type:'related'})});await loadGroups()};
 loadProfiles();loadCandidates();
 </script></html>"""

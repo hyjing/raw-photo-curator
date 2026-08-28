@@ -47,6 +47,9 @@ raw-curator serve /path/to/photos --output reports/live
 顶部可以切换 Travel、Portrait、Landscape、Wildlife 和 Custom 选片标准。Profile 的显式
 权重会直接改变推荐先验；硬规则始终先于本地学习偏好执行。
 
+“相似组”视图使用拍摄时间、相机序列、感知哈希和本地视觉描述符识别近似重复与连拍。
+组内照片支持同步缩放、最佳/淘汰反馈，以及持久化拆分和合并纠正。
+
 ```bash
 raw-curator analyze /path/to/photos --output reports/latest --limit 50
 ```
