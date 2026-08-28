@@ -1,9 +1,9 @@
 import argparse
-import hashlib
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
+from .catalog import Catalog, fingerprint
 from .image_io import as_array, discover, load_preview
 from .models import Result
 from .report import write_report
@@ -17,6 +17,7 @@ def analyze(
     limit: int | None = None,
     offset: int = 0,
     progress: Callable[[int, int], None] | None = None,
+    stats: Callable[[dict[str, int]], None] | None = None,
 ) -> list[Result]:
     paths = discover(folder)
     if limit is not None:
@@ -26,24 +27,41 @@ def analyze(
     thumbs = output / "thumbnails"
     thumbs.mkdir(parents=True, exist_ok=True)
     results: list[Result] = []
+    run_stats = {"hits": 0, "misses": 0, "failed": 0}
     if progress:
         progress(0, len(paths))
-    for number, path in enumerate(paths, start=1):
-        try:
-            image = load_preview(path)
-            metrics = measure(as_array(image))
-            keep, edit = scores(metrics)
-            digest = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:16]
-            thumb_name = f"{digest}.jpg"
-            image.save(thumbs / thumb_name, "JPEG", quality=84, optimize=True)
-            results.append(Result(path, keep, edit, metrics, explain(metrics), f"thumbnails/{thumb_name}"))
-            print(f"[{number}/{len(paths)}] {path.name}: 保留 {keep:.0f} / 调色 {edit:.0f}")
-        # A damaged/unsupported file should not abort a long folder scan.
-        except Exception as exc:  # noqa: BLE001
-            print(f"跳过 {path}: {exc}", file=sys.stderr)
-        finally:
-            if progress:
-                progress(number, len(paths))
+    with Catalog(output / "catalog.sqlite3") as catalog:
+        for number, path in enumerate(paths, start=1):
+            try:
+                cached = catalog.cached(path, output)
+                if cached:
+                    results.append(cached)
+                    run_stats["hits"] += 1
+                else:
+                    image = load_preview(path)
+                    metrics = measure(as_array(image))
+                    keep, edit = scores(metrics)
+                    thumb_name = f"{fingerprint(path)[:20]}.jpg"
+                    image.save(thumbs / thumb_name, "JPEG", quality=84, optimize=True)
+                    result = Result(
+                        path, keep, edit, metrics, explain(metrics), f"thumbnails/{thumb_name}"
+                    )
+                    catalog.store(result)
+                    results.append(result)
+                    run_stats["misses"] += 1
+            # A damaged/unsupported file should not abort a long folder scan.
+            except Exception as exc:  # noqa: BLE001
+                run_stats["failed"] += 1
+                print(f"跳过 {path}: {exc}", file=sys.stderr)
+            finally:
+                if progress:
+                    progress(number, len(paths))
+    if stats:
+        stats(run_stats)
+    print(
+        f"扫描完成：{len(results)} 张 · 缓存命中 {run_stats['hits']} · "
+        f"新分析 {run_stats['misses']} · 失败 {run_stats['failed']}"
+    )
     return sorted(results, key=lambda item: item.keep_score, reverse=True)
 
 
