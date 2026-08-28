@@ -44,6 +44,9 @@ raw-curator serve /path/to/photos --output reports/live
 的照片立即由下一张推荐补位。保留满 5 张后进入下一轮，已保留和已淘汰照片都会被排除，
 并使用累计反馈重新计算个人推荐分。
 
+顶部可以切换 Travel、Portrait、Landscape、Wildlife 和 Custom 选片标准。Profile 的显式
+权重会直接改变推荐先验；硬规则始终先于本地学习偏好执行。
+
 ```bash
 raw-curator analyze /path/to/photos --output reports/latest --limit 50
 ```

@@ -24,11 +24,11 @@ RAW Photo Curator 的方向是：**用户定义明确规则，程序在本机学
 
 目标：在增加更多模型前，先建立稳定、可扩展的标准系统。
 
-- [ ] 实现 Profile：Travel、Portrait、Landscape、Wildlife 和 Custom
-- [ ] 将标准分为 `hard_rule`、`soft_weight`、`learned_preference`
-- [ ] 明确优先级：硬规则 > 用户显式权重 > 本地偏好 > 通用先验
-- [ ] Criterion 统一输出：分数、置信度、证据、版本和计算成本
-- [ ] Analyzer Plugin 接口支持按需注册和禁用
+- [x] 实现 Profile：Travel、Portrait、Landscape、Wildlife 和 Custom
+- [x] 将标准分为 `hard_rule`、`soft_weight`、`learned_preference`
+- [x] 明确优先级：硬规则 > 用户显式权重 > 本地偏好 > 通用先验
+- [x] Criterion 统一输出：分数、置信度、证据、版本和计算成本
+- [x] Analyzer Plugin Python Protocol（注册表与按需禁用待补）
 - [ ] Profile、模型选择和权重全部本地持久化
 - [ ] 可选模型显示下载大小、运行成本和隐私边界
 

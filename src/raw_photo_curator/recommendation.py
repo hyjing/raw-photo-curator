@@ -11,7 +11,7 @@ def _vector(result: Result) -> np.ndarray:
 
 
 def recommendation_scores(
-    results: list[Result], feedback: dict[str, dict]
+    results: list[Result], feedback: dict[str, dict], priors: dict[str, float] | None = None
 ) -> dict[str, float]:
     positives: list[np.ndarray] = []
     negatives: list[np.ndarray] = []
@@ -39,6 +39,7 @@ def recommendation_scores(
             preference = 100 * (1 - min(1.0, float(np.linalg.norm(vector - positive_center)) / dimension_scale))
         elif negative_center is not None:
             preference = 100 * min(1.0, float(np.linalg.norm(vector - negative_center)) / dimension_scale)
-        score = result.keep_score * (1 - alpha) + preference * alpha
+        prior = priors.get(str(result.path), result.keep_score) if priors else result.keep_score
+        score = prior * (1 - alpha) + preference * alpha
         output[str(result.path)] = round(float(score), 1)
     return output

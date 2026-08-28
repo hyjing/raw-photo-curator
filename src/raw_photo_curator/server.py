@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 from PIL import Image
 
 from .models import Result
+from .profiles import BUILTIN_PROFILES, Profile, hard_rule_reasons, weighted_score
 from .recommendation import recommendation_scores
 
 CHOICES = {"keep", "edit", "reject", "maybe", None}
@@ -60,12 +61,65 @@ def _connect(path: Path) -> sqlite3.Connection:
         degrees INTEGER NOT NULL DEFAULT 0
         )"""
     )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS profiles (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, weights TEXT NOT NULL,
+        hard_rules TEXT NOT NULL, enabled_plugins TEXT NOT NULL,
+        is_builtin INTEGER NOT NULL DEFAULT 0
+        )"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY, value TEXT NOT NULL
+        )"""
+    )
+    for profile in BUILTIN_PROFILES:
+        connection.execute(
+            """INSERT OR IGNORE INTO profiles
+            (id, name, weights, hard_rules, enabled_plugins, is_builtin)
+            VALUES (?, ?, ?, ?, ?, 1)""",
+            (
+                profile.id,
+                profile.name,
+                json.dumps(profile.weights),
+                json.dumps(profile.hard_rules),
+                json.dumps(profile.enabled_plugins),
+            ),
+        )
+    connection.execute(
+        "INSERT OR IGNORE INTO app_settings(key, value) VALUES ('active_profile', 'travel')"
+    )
+    connection.commit()
     return connection
+
+
+def _profiles(database: Path) -> list[Profile]:
+    with _connect(database) as connection:
+        return [
+            Profile(
+                row["id"],
+                row["name"],
+                json.loads(row["weights"]),
+                json.loads(row["hard_rules"]),
+                tuple(json.loads(row["enabled_plugins"])),
+            )
+            for row in connection.execute("SELECT * FROM profiles ORDER BY is_builtin DESC, name")
+        ]
+
+
+def _active_profile(database: Path) -> Profile:
+    with _connect(database) as connection:
+        active = connection.execute(
+            "SELECT value FROM app_settings WHERE key = 'active_profile'"
+        ).fetchone()["value"]
+    return next((profile for profile in _profiles(database) if profile.id == active), _profiles(database)[0])
 
 
 def _photo_payload(results: list[Result], database: Path) -> list[dict]:
     saved = _read_feedback(database)
-    personalized = recommendation_scores(results, saved)
+    profile = _active_profile(database)
+    priors = {str(result.path): weighted_score(result, profile) for result in results}
+    personalized = recommendation_scores(results, saved, priors)
     payload = []
     for index, result in enumerate(results):
         item = result.to_dict()
@@ -88,7 +142,9 @@ def _read_feedback(database: Path) -> dict[str, dict]:
 
 def _refresh_candidates(state: SessionState, database: Path) -> None:
     feedback = _read_feedback(database)
-    scores = recommendation_scores(state.results, feedback)
+    profile = _active_profile(database)
+    priors = {str(result.path): weighted_score(result, profile) for result in state.results}
+    scores = recommendation_scores(state.results, feedback, priors)
     current = set(state.candidate_paths or [])
     kept_current = [
         path for path in (state.candidate_paths or [])
@@ -104,7 +160,11 @@ def _refresh_candidates(state: SessionState, database: Path) -> None:
         state.round_number += 1
     excluded = set(feedback) | current
     available = sorted(
-        (result for result in state.results if str(result.path) not in excluded),
+        (
+            result
+            for result in state.results
+            if str(result.path) not in excluded and not hard_rule_reasons(result, profile)
+        ),
         key=lambda result: scores[str(result.path)],
         reverse=True,
     )
@@ -117,7 +177,9 @@ def _candidate_payload(state: SessionState, database: Path) -> list[dict]:
     feedback = _read_feedback(database)
     with _connect(database) as connection:
         rotations = {row["path"]: row["degrees"] for row in connection.execute("SELECT * FROM rotations")}
-    scores = recommendation_scores(state.results, feedback)
+    profile = _active_profile(database)
+    priors = {str(result.path): weighted_score(result, profile) for result in state.results}
+    scores = recommendation_scores(state.results, feedback, priors)
     by_path = {str(result.path): result for result in state.results}
     output = []
     for path in state.candidate_paths or []:
@@ -128,6 +190,8 @@ def _candidate_payload(state: SessionState, database: Path) -> list[dict]:
         rotation = rotations.get(path, 0)
         item["thumbnail"] = f"/thumbnails/{Path(result.thumbnail).name}?v={result.path.stat().st_mtime_ns}&r={rotation}"
         item["recommendation_score"] = scores[path]
+        item["profile_score"] = priors[path]
+        item["profile_id"] = profile.id
         item["kept"] = feedback.get(path, {}).get("choice") == "keep"
         item["rotation"] = rotation
         output.append(item)
@@ -191,6 +255,13 @@ def make_handler(state: SessionState, database: Path):
                     "folder": str(state.folder),
                     "round": state.round_number,
                     "summary": _summary(database, state.results),
+                    "active_profile": _active_profile(database).id,
+                })
+            elif route == "/api/profiles":
+                active = _active_profile(database)
+                self._json({
+                    "profiles": [profile.to_dict() for profile in _profiles(database)],
+                    "active_profile": active.id,
                 })
             elif route.startswith("/thumbnails/"):
                 name = Path(route).name
@@ -229,6 +300,9 @@ def make_handler(state: SessionState, database: Path):
             if route == "/api/cancel":
                 state.cancel_event.set()
                 self._json({"ok": True, "running": state.progress_running})
+                return
+            if route == "/api/profile":
+                self._change_profile()
                 return
             if route == "/api/rotation":
                 self._rotate_photo()
@@ -356,7 +430,12 @@ def make_handler(state: SessionState, database: Path):
                     return
                 state.progress_stage = "ranking"
                 feedback = _read_feedback(database)
-                scores = recommendation_scores(all_results, feedback)
+                profile = _active_profile(database)
+                priors = {
+                    str(result.path): weighted_score(result, profile)
+                    for result in all_results
+                }
+                scores = recommendation_scores(all_results, feedback, priors)
                 reviewed_paths = set(feedback)
                 state.results = sorted(
                     all_results,
@@ -399,6 +478,28 @@ def make_handler(state: SessionState, database: Path):
                 })
             except (ValueError, KeyError, json.JSONDecodeError):
                 self._json({"ok": False, "error": "invalid rotation"}, HTTPStatus.BAD_REQUEST)
+
+        def _change_profile(self) -> None:
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(min(size, 16_384)))
+                profile_id = str(data["profile_id"])
+                if profile_id not in {profile.id for profile in _profiles(database)}:
+                    raise ValueError("unknown profile")
+                with _connect(database) as connection:
+                    connection.execute(
+                        "UPDATE app_settings SET value = ? WHERE key = 'active_profile'",
+                        (profile_id,),
+                    )
+                state.candidate_paths = []
+                _refresh_candidates(state, database)
+                self._json({
+                    "ok": True,
+                    "active_profile": profile_id,
+                    "candidates": _candidate_payload(state, database),
+                })
+            except (ValueError, KeyError, json.JSONDecodeError):
+                self._json({"ok": False, "error": "invalid profile"}, HTTPStatus.BAD_REQUEST)
 
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -480,15 +581,16 @@ APP_HTML = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <style>
 :root{color-scheme:dark;--bg:#090b10;--surface:#11141b;--surface2:#181c24;--line:#262b36;--text:#f4f5f7;--muted:#9198a6;--accent:#7cf3ad;--danger:#ff8585}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% -10%,#1c2730 0,transparent 32%),var(--bg);color:var(--text);font:15px Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input{font:inherit}
 header{position:sticky;top:0;z-index:5;padding:18px 4vw 16px;border-bottom:1px solid #ffffff0f;background:#090b10de;backdrop-filter:blur(20px)}.topline{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.brand{display:flex;align-items:center;gap:11px}.mark{display:grid;place-items:center;width:34px;height:34px;border-radius:11px;background:linear-gradient(145deg,#83f7b4,#58bfff);color:#07100b;font-weight:900}.brand h1{font-size:17px;letter-spacing:-.02em;margin:0}.brand small{display:block;color:var(--muted);font-size:11px;margin-top:2px}.meta{display:flex;gap:8px}.chip{padding:6px 10px;border:1px solid var(--line);border-radius:999px;color:#b9bec8;background:#ffffff05;font-size:12px}
-.controls{display:grid;grid-template-columns:minmax(280px,1fr) auto;gap:10px}.pathbox{display:flex;align-items:center;gap:9px;padding:0 13px;border:1px solid var(--line);border-radius:12px;background:#0d1016;transition:.2s}.pathbox:focus-within{border-color:#65d998;box-shadow:0 0 0 3px #65d99814}.pathbox span{color:#697181}input{width:100%;border:0;outline:0;background:transparent;color:var(--text);padding:12px 0}button{border:1px solid var(--line);background:#20252f;color:var(--text);border-radius:11px;padding:10px 14px;cursor:pointer;transition:.18s}button:hover{border-color:#4c5565;transform:translateY(-1px)}button:disabled{opacity:.5;cursor:default;transform:none}#start{background:var(--text);color:#0b0d11;border:0;font-weight:750;padding-inline:20px}.activity{display:flex;align-items:center;gap:12px;min-height:20px;margin-top:10px}progress{width:180px;height:5px;border:0;accent-color:var(--accent)}#status{color:var(--muted);font-size:12px}
+.controls{display:grid;grid-template-columns:minmax(280px,1fr) auto auto;gap:10px}.pathbox{display:flex;align-items:center;gap:9px;padding:0 13px;border:1px solid var(--line);border-radius:12px;background:#0d1016;transition:.2s}.pathbox:focus-within{border-color:#65d998;box-shadow:0 0 0 3px #65d99814}.pathbox span{color:#697181}input{width:100%;border:0;outline:0;background:transparent;color:var(--text);padding:12px 0}select,button{border:1px solid var(--line);background:#20252f;color:var(--text);border-radius:11px;padding:10px 14px;cursor:pointer;transition:.18s}button:hover{border-color:#4c5565;transform:translateY(-1px)}button:disabled{opacity:.5;cursor:default;transform:none}#start{background:var(--text);color:#0b0d11;border:0;font-weight:750;padding-inline:20px}.activity{display:flex;align-items:center;gap:12px;min-height:20px;margin-top:10px}progress{width:180px;height:5px;border:0;accent-color:var(--accent)}#status{color:var(--muted);font-size:12px}
 main{max-width:1540px;margin:auto;padding:28px 4vw 60px}.grid{display:grid;grid-template-columns:1fr;gap:26px}.card{position:relative;display:grid;grid-template-columns:minmax(0,1.8fr) minmax(350px,.82fr);background:linear-gradient(145deg,#171b23,#11141a);border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:0 18px 60px #0005}.card.kept{border-color:#56d88d;box-shadow:0 18px 60px #0005,0 0 0 1px #56d88d55}.rank{position:absolute;z-index:2;top:14px;left:14px;padding:7px 10px;border:1px solid #ffffff26;border-radius:10px;background:#07090ba8;backdrop-filter:blur(12px);font-weight:800}.photo-wrap{position:relative;display:grid;place-items:center;min-height:470px;background:linear-gradient(145deg,#08090c,#0e1116)}.card img{display:block;width:100%;height:100%;max-height:72vh;object-fit:contain}.body{display:flex;flex-direction:column;padding:23px}.eyebrow{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.title-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:5px}.name{font-size:18px;font-weight:750;overflow-wrap:anywhere}.rotate{position:absolute;z-index:2;top:14px;right:14px;padding:9px 13px;white-space:nowrap;background:#07090bc7;border-color:#ffffff2b;backdrop-filter:blur(12px);box-shadow:0 5px 18px #0006}.rotate:hover{background:#20252ee8}.score{display:flex;gap:9px;margin:16px 0 12px}.score span{display:flex;flex-direction:column;gap:2px;flex:1;padding:10px 12px;border:1px solid var(--line);border-radius:12px;color:var(--muted);font-size:11px;background:#0b0e13}.score strong{font-size:22px;color:var(--text);line-height:1.1}.reason{min-height:44px;color:#c8ccd4;line-height:1.55}.radar{display:block;width:100%;max-width:280px;margin:auto}.radar .gridline{fill:none;stroke:#343a46;stroke-width:1}.radar .axis{stroke:#2b303a}.radar .shape{fill:#72eca535;stroke:#72eca5;stroke-width:2}.radar text{fill:#aeb4bf;font:11px system-ui}.actions{display:grid;grid-template-columns:1.25fr 1fr;gap:9px;margin-top:auto;padding-top:14px}.actions button{font-weight:700}.keep{background:#22633e;border-color:#388d5b}.keep:hover{background:#2b784b}.reject{background:#302328;border-color:#5a343d;color:#ffc4c4}.reject:hover{background:#48282f}.badge{color:var(--accent);font-size:12px;margin-top:9px}
 @media(max-width:900px){header{position:relative}.card{grid-template-columns:1fr}.photo-wrap{min-height:0}.card img{max-height:none;aspect-ratio:3/2}.radar{max-width:250px}}@media(max-width:640px){.controls{grid-template-columns:1fr}.topline{align-items:flex-start}.meta{flex-direction:column}.card{border-radius:15px}.body{padding:18px}}
-</style><header><div class="topline"><div class="brand"><div class="mark">R</div><div><h1>RAW Photo Curator</h1><small>Local-first photo selection</small></div></div><div class="meta"><span class="chip" id="round">第 1 轮</span><span class="chip" id="summary">尚未选择</span></div></div><div class="controls"><label class="pathbox"><span>⌁</span><input id="folder" aria-label="本地照片文件夹" placeholder="输入包含 ARW / JPG 的照片文件夹"></label><div><button id="cancel" hidden>取消</button> <button id="start">生成 Top 5</button></div></div><div class="activity"><progress id="progress" value="0" max="100" hidden></progress><span id="status">输入本地照片路径，分析结果只保存在这台设备</span></div></header>
+</style><header><div class="topline"><div class="brand"><div class="mark">R</div><div><h1>RAW Photo Curator</h1><small>Local-first photo selection</small></div></div><div class="meta"><span class="chip" id="round">第 1 轮</span><span class="chip" id="summary">尚未选择</span></div></div><div class="controls"><label class="pathbox"><span>⌁</span><input id="folder" aria-label="本地照片文件夹" placeholder="输入包含 ARW / JPG 的照片文件夹"></label><select id="profile" aria-label="选片标准"></select><div><button id="cancel" hidden>取消</button> <button id="start">生成 Top 5</button></div></div><div class="activity"><progress id="progress" value="0" max="100" hidden></progress><span id="status">输入本地照片路径，分析结果只保存在这台设备</span></div></header>
 <main><div class="grid" id="grid"></div></main>
 <script>
-const folder=document.getElementById('folder'),start=document.getElementById('start'),cancel=document.getElementById('cancel'),bar=document.getElementById('progress'),statusEl=document.getElementById('status'),grid=document.getElementById('grid'),roundEl=document.getElementById('round'),summaryEl=document.getElementById('summary');
+const folder=document.getElementById('folder'),profile=document.getElementById('profile'),start=document.getElementById('start'),cancel=document.getElementById('cancel'),bar=document.getElementById('progress'),statusEl=document.getElementById('status'),grid=document.getElementById('grid'),roundEl=document.getElementById('round'),summaryEl=document.getElementById('summary');
 const escapeHTML=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 async function loadCandidates(){const d=await(await fetch('/api/candidates')).json();folder.value=d.folder;roundEl.textContent=`第 ${d.round} 轮`;summaryEl.textContent=`累计保留 ${d.summary.keep} · 淘汰 ${d.summary.reject}`;render(d.candidates)}
+async function loadProfiles(){const d=await(await fetch('/api/profiles')).json();profile.innerHTML=d.profiles.map(p=>`<option value="${p.id}">${escapeHTML(p.name)}</option>`).join('');profile.value=d.active_profile}
 const axes=[['清晰',m=>m.sharpness],['曝光',m=>m.exposure],['动态范围',m=>(m.highlights+m.shadows)/2],['对比',m=>m.contrast],['色彩',m=>(m.color+m.white_balance)/2],['构图',m=>m.composition]];
 function polygon(values,radius){return values.map((value,i)=>{const angle=-Math.PI/2+i*Math.PI/3,r=radius*value/100;return `${110+Math.cos(angle)*r},${100+Math.sin(angle)*r}`}).join(' ')}
 function radar(metrics){const values=axes.map(axis=>Math.round(axis[1](metrics)));const grids=[25,50,75,100].map(level=>`<polygon class="gridline" points="${polygon(Array(6).fill(level),72)}"/>`).join('');const lines=axes.map((_,i)=>{const a=-Math.PI/2+i*Math.PI/3;return `<line class="axis" x1="110" y1="100" x2="${110+Math.cos(a)*72}" y2="${100+Math.sin(a)*72}"/>`}).join('');const labels=axes.map((axis,i)=>{const a=-Math.PI/2+i*Math.PI/3,x=110+Math.cos(a)*91,y=104+Math.sin(a)*86;return `<text x="${x}" y="${y}" text-anchor="middle">${axis[0]} ${values[i]}</text>`}).join('');return `<svg class="radar" viewBox="0 0 220 200" role="img" aria-label="六项照片评分"><title>六项照片评分</title>${grids}${lines}<polygon class="shape" points="${polygon(values,72)}"/>${labels}</svg>`}
@@ -500,5 +602,6 @@ const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function followJob(){while(true){const p=await(await fetch('/api/progress')).json();if(p.total)bar.value=p.current/p.total*100;if(p.stage==='ranking')statusEl.textContent='正在根据反馈生成 Top 5…';else if(p.running)statusEl.textContent=`正在分析 ${p.current} / ${p.total}（${p.total?Math.round(p.current/p.total*100):0}%）`;if(!p.running){if(p.stage==='done'){await loadCandidates();statusEl.textContent=`已分析 ${p.total} 张 · 缓存 ${p.cache_hits} · 新分析 ${p.cache_misses}${p.failed?` · 跳过 ${p.failed}`:''}`}else if(p.stage==='cancelled')statusEl.textContent='已取消；下次会从缓存进度继续';else statusEl.textContent=p.error||'分析失败';break}await wait(350)}}
 start.onclick=async()=>{start.disabled=true;cancel.disabled=false;cancel.hidden=false;bar.hidden=false;bar.value=0;statusEl.textContent='正在建立本地照片索引…';try{const d=await(await fetch('/api/recommendations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:folder.value})})).json();if(d.ok)await followJob();else statusEl.textContent=d.error||'分析失败'}finally{bar.value=100;setTimeout(()=>bar.hidden=true,1000);cancel.hidden=true;start.disabled=false}};
 cancel.onclick=async()=>{cancel.disabled=true;await fetch('/api/cancel',{method:'POST'});statusEl.textContent='正在安全停止…'};
-loadCandidates();
+profile.onchange=async()=>{profile.disabled=true;const d=await(await fetch('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile_id:profile.value})})).json();if(d.ok){render(d.candidates);statusEl.textContent=`已切换到 ${profile.options[profile.selectedIndex].text} 标准并重新排序`}profile.disabled=false};
+loadProfiles();loadCandidates();
 </script></html>"""
