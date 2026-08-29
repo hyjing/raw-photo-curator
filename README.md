@@ -91,6 +91,25 @@ raw-curator analyze /path/to/photos --output reports/latest --limit 50
 分离、景深和动作时机代理无需下载；人脸/闭眼与审美模型在适配器未安装时保持禁用和
 unknown。新启用的插件独立补算自己的 Criterion，不会使已有基础分析缓存失效。
 
+## 下游工作流
+
+选片清单可以导出为 JSON 或 CSV；XMP 使用 Adobe 标准的 `xmp:Rating`、`xmp:Label` 与
+Camera Raw `crs:Pick`，只创建 sidecar，绝不修改 RAW。先生成计划、检查冲突，再执行并
+保留审计日志：
+
+```bash
+raw-curator export reports/live/feedback.sqlite3 selection.json --profile travel
+raw-curator plan-xmp selection.json --output xmp-plan.json
+raw-curator apply-plan xmp-plan.json --audit xmp-audit.json
+
+raw-curator plan-files selection.json selected/ --method hardlink --output file-plan.json
+raw-curator apply-plan file-plan.json --audit file-audit.json
+raw-curator undo file-audit.json
+```
+
+计划中已有目标文件会标记为 `conflict` 并跳过，不会覆盖。`copy`、`hardlink` 和 `symlink`
+使用相同的预览、审计与撤销流程。
+
 ## 隐私
 
 所有处理默认在本机完成。生成的报告只包含缩略图和分析数据。

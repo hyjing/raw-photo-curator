@@ -1,5 +1,6 @@
 import argparse
 import json
+import sqlite3
 import sys
 from collections.abc import Callable
 from dataclasses import replace
@@ -17,6 +18,13 @@ from .plugins import default_registry
 from .report import write_report
 from .scoring import explain, measure, scores
 from .server import serve
+from .workflow import (
+    apply_actions,
+    export_selection,
+    plan_file_actions,
+    plan_xmp_actions,
+    undo_actions,
+)
 
 
 def analyze(
@@ -138,6 +146,11 @@ def main() -> None:
     command = sub.add_parser("analyze", help="分析照片文件夹并生成静态报告")
     live = sub.add_parser("serve", help="启动本地交互式选片工作台")
     evaluation = sub.add_parser("evaluate-groups", help="使用本地人工标注评测分组")
+    plan_files = sub.add_parser("plan-files", help="预览复制/硬链接/符号链接操作")
+    apply_plan = sub.add_parser("apply-plan", help="执行预览过的文件计划并写审计日志")
+    undo = sub.add_parser("undo", help="按审计日志撤销文件操作")
+    export = sub.add_parser("export", help="导出 JSON/CSV 选片清单")
+    plan_xmp = sub.add_parser("plan-xmp", help="预览非破坏性 XMP sidecar 写入")
     for item in (command, live):
         item.add_argument("folder", type=Path)
         item.add_argument("--output", type=Path, default=Path("reports/latest"))
@@ -145,6 +158,19 @@ def main() -> None:
     live.add_argument("--port", type=int, default=8765)
     evaluation.add_argument("catalog", type=Path)
     evaluation.add_argument("labels", type=Path)
+    plan_files.add_argument("manifest", type=Path, help="包含 photos/path 的选片 JSON")
+    plan_files.add_argument("destination", type=Path)
+    plan_files.add_argument("--method", choices=("copy", "hardlink", "symlink"), default="copy")
+    plan_files.add_argument("--output", type=Path, default=Path("file-plan.json"))
+    apply_plan.add_argument("plan", type=Path)
+    apply_plan.add_argument("--audit", type=Path, default=Path("file-audit.json"))
+    undo.add_argument("audit", type=Path)
+    export.add_argument("database", type=Path)
+    export.add_argument("destination", type=Path)
+    export.add_argument("--format", choices=("json", "csv"), default="json")
+    export.add_argument("--profile", default="travel")
+    plan_xmp.add_argument("manifest", type=Path)
+    plan_xmp.add_argument("--output", type=Path, default=Path("xmp-plan.json"))
     args = parser.parse_args()
     if args.command == "evaluate-groups":
         labels = json.loads(args.labels.read_text())
@@ -154,6 +180,41 @@ def main() -> None:
                 for group in catalog.groups()
             ]
         print(json.dumps(grouping_metrics(predicted, labels["groups"]), indent=2))
+        return
+    if args.command == "plan-files":
+        manifest = json.loads(args.manifest.read_text())
+        paths = [item["path"] for item in manifest["photos"] if item.get("choice") in {"keep", "edit"}]
+        actions = plan_file_actions(paths, args.destination, args.method)
+        args.output.write_text(json.dumps([action.__dict__ for action in actions], indent=2))
+        print(f"计划：{args.output.resolve()} · {len(actions)} 项")
+        return
+    if args.command == "apply-plan":
+        from .workflow import FileAction
+
+        actions = [FileAction(**item) for item in json.loads(args.plan.read_text())]
+        audit = apply_actions(actions, args.audit)
+        print(f"已执行 {len(audit['actions'])} 项；审计：{args.audit.resolve()}")
+        return
+    if args.command == "undo":
+        print(f"已撤销 {undo_actions(args.audit)} 项")
+        return
+    if args.command == "export":
+        connection = sqlite3.connect(args.database)
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            "SELECT path, choice, rating, tags, note, updated_at FROM profile_feedback WHERE profile_id = ?",
+            (args.profile,),
+        ).fetchall()
+        connection.close()
+        export_selection({row["path"]: dict(row) for row in rows}, args.destination, args.format)
+        print(f"已导出：{args.destination.resolve()} · {len(rows)} 条")
+        return
+    if args.command == "plan-xmp":
+        manifest = json.loads(args.manifest.read_text())
+        feedback = {item["path"]: item for item in manifest["photos"]}
+        actions = plan_xmp_actions(feedback)
+        args.output.write_text(json.dumps([action.__dict__ for action in actions], indent=2))
+        print(f"XMP 计划：{args.output.resolve()} · {len(actions)} 项")
         return
     if not args.folder.is_dir():
         parser.error(f"照片文件夹不存在：{args.folder}")

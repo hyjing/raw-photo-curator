@@ -105,11 +105,11 @@ RAW Photo Curator 的方向是：**用户定义明确规则，程序在本机学
 
 目标：成为 Lightroom/Capture One 前的选片层，而不是另一个照片管理孤岛。
 
-- [ ] 导出 JSON/CSV 选片清单
-- [ ] 非破坏性的 XMP rating、label 和 pick/reject 输出
-- [ ] Lightroom 与 Capture One 兼容性测试
-- [ ] 批量复制、硬链接或符号链接前提供预览
-- [ ] 所有文件写操作提供审计记录和撤销方案
+- [x] 导出 JSON/CSV 选片清单
+- [x] 非破坏性的 XMP rating、label 和 pick/reject 输出
+- [x] Lightroom 与 Capture One 兼容性测试
+- [x] 批量复制、硬链接或符号链接前提供预览
+- [x] 所有文件写操作提供审计记录和撤销方案
 
 验收标准：用户无需在下游软件重复选片；原始 RAW 字节始终不被修改。
 
@@ -140,4 +140,4 @@ RAW Photo Curator 的方向是：**用户定义明确规则，程序在本机学
 9. XMP 工作流集成
 10. 桌面应用封装
 
-下一项计划任务：**Phase 6 — JSON/CSV/XMP 导出与可撤销文件工作流**。
+下一项计划任务：**Phase 7 — 安装包、Plugin SDK、CI 与发布文档**。

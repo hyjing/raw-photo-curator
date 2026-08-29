@@ -269,6 +269,13 @@ final_score = explicit_weight * explicit_score
 rate、NDCG、95% bootstrap 区间，以及 5/10/20/50 条反馈学习曲线。匿名统计设置默认
 `off`，当前版本没有任何上传实现。
 
+## 10. Non-destructive workflow
+
+JSON/CSV 是可移植的选择清单。Lightroom/Capture One 集成通过同名 `.xmp` sidecar 交换
+rating、label 和 pick/reject，不修改 RAW。复制、硬链接、符号链接和 XMP 都先序列化为
+`FileAction[]`；目标存在时标记 conflict。执行结果写入版本化审计 JSON，撤销只删除该
+审计记录中由本次操作创建的文件，且重复撤销为无操作。
+
 ## 9. Explanation design
 
 解释由结构化决策记录生成，不由语言模型猜测：
