@@ -1,4 +1,8 @@
 from itertools import combinations
+from pathlib import Path
+
+from .catalog import Catalog
+from .grouping import build_groups
 
 
 def _pairs(groups: list[list[str]]) -> set[tuple[str, str]]:
@@ -25,4 +29,34 @@ def grouping_metrics(
         "predicted_pairs": len(predicted),
         "labeled_pairs": len(labeled),
         "true_positive_pairs": true_positive,
+    }
+
+
+def evaluate_manual_corrections(catalog_path: Path) -> dict[str, object]:
+    """Compare fresh automatic grouping with the user-corrected label universe."""
+    with Catalog(catalog_path) as catalog:
+        records = catalog.photo_records()
+        corrected = [group for group in catalog.groups() if group["manually_corrected"]]
+    labels = [
+        [str(member["path"]) for member in group["members"]]
+        for group in corrected
+    ]
+    universe = {path for group in labels for path in group}
+    by_id = {str(record["id"]): str(record["path"]) for record in records}
+    predicted = []
+    for group in build_groups(records):
+        paths = [
+            by_id[photo_id]
+            for photo_id in group.photo_ids
+            if by_id[photo_id] in universe
+        ]
+        if len(paths) >= 2:
+            predicted.append(paths)
+    return {
+        "schema": "raw-curator-group-correction-evaluation-v1",
+        "labeled_photos": len(universe),
+        "labeled_groups": len(labels),
+        "predicted_groups_in_label_universe": len(predicted),
+        "labels": {"groups": labels},
+        "metrics": grouping_metrics(predicted, labels),
     }

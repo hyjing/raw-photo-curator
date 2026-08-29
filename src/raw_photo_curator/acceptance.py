@@ -97,11 +97,24 @@ def acceptance_report(
             "non-empty manually labeled pair set",
         )
     else:
-        checks["labeled_group_evaluation"] = {
-            "status": "missing",
-            "value": None,
-            "requirement": "pass --group-labels with a manually labeled JSON set",
-        }
+        correction_report = report_directory / "group-correction-evaluation.json"
+        if correction_report.is_file():
+            correction_evaluation = json.loads(correction_report.read_text(encoding="utf-8"))
+            grouping = correction_evaluation.get("metrics")
+            labeled_pairs = int(grouping.get("labeled_pairs", 0)) if grouping else 0
+            checks["labeled_group_evaluation"] = _check(
+                labeled_pairs > 0,
+                correction_evaluation,
+                "non-empty real correction label set evaluated in its labeled universe",
+            )
+        else:
+            checks["labeled_group_evaluation"] = {
+                "status": "missing",
+                "value": None,
+                "requirement": (
+                    "pass --group-labels or run evaluate-corrections after a real correction"
+                ),
+            }
 
     blocking = [name for name, check in checks.items() if check["status"] != "pass"]
     return {

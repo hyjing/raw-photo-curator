@@ -42,5 +42,8 @@ Current Alaska evidence (2026-08-29): 355 photos, 100% catalog cache coverage, z
 17 cached criteria, and 13 real Travel decisions. The stratified holdout used 10 training and 3
 test photos. All three scoring modes reached 100% pairwise accuracy over only two test pairs, so the
 tool truthfully reports that personalization has **not** exceeded the baseline. This is pipeline
-evidence, not a statistically strong product claim. Group-correction and manual grouping-label
-gates remain open.
+evidence, not a statistically strong product claim. The grouping gate was subsequently completed
+from one real five-photo merge correction. Rebuilding the automatic grouping inside that labeled
+universe produced two groups: precision 1.0, recall 0.4, and F1 0.5714 over 10 labeled pairs. This
+shows conservative under-grouping rather than false merges and is an initial acceptance result,
+not a broad accuracy claim.

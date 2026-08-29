@@ -19,6 +19,11 @@ test pairs (Top-5 hit rate 1.0, NDCG 1.0). Personalization therefore did not exc
 the sample is far too small for a general accuracy claim. The result is reproducible with
 `raw-curator evaluate-personal reports/alaska-cache-validation --profile travel`.
 
+The first real Phase 2 correction covered five Alaska photos that the user merged into one group.
+Against those 10 labeled pairs, a fresh automatic grouping produced 4 predicted pairs, all correct:
+precision 1.0, recall 0.4, and F1 0.5714. This exposes conservative under-grouping and is
+reproducible with `raw-curator evaluate-corrections reports/alaska-cache-validation`.
+
 These are development-machine measurements, not universal guarantees. First-time optional plugin
 backfill can take several minutes; subsequent runs reuse plugin-specific cache entries. Run the
 same folder twice and inspect the scan summary to reproduce the warm-cache result.

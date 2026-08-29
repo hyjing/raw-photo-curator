@@ -9,7 +9,7 @@ from pathlib import Path
 from .acceptance import acceptance_report
 from .catalog import Catalog, fingerprint
 from .embedding import ColorGridEmbedding
-from .evaluation import grouping_metrics
+from .evaluation import evaluate_manual_corrections, grouping_metrics
 from .grouping import build_groups
 from .image_io import RAW_EXTENSIONS, as_array, discover, load_preview
 from .metadata import PhotoMetadata, extract_metadata, extract_raw_metrics, perceptual_hash
@@ -157,6 +157,9 @@ def main() -> None:
     install_model_command = sub.add_parser("install-model", help="下载并校验可选本地模型")
     acceptance = sub.add_parser("acceptance", help="生成机器可读的本地 roadmap 验收报告")
     personal_evaluation = sub.add_parser("evaluate-personal", help="离线复现个人排序留出评测")
+    correction_evaluation = sub.add_parser(
+        "evaluate-corrections", help="用真实拆分/合并纠正评测自动分组"
+    )
     for item in (command, live):
         item.add_argument("folder", type=Path)
         item.add_argument("--output", type=Path, default=Path("reports/latest"))
@@ -185,6 +188,8 @@ def main() -> None:
     personal_evaluation.add_argument("report", type=Path)
     personal_evaluation.add_argument("--profile", default="travel")
     personal_evaluation.add_argument("--output", type=Path)
+    correction_evaluation.add_argument("report", type=Path)
+    correction_evaluation.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.command == "evaluate-groups":
         labels = json.loads(args.labels.read_text())
@@ -194,6 +199,14 @@ def main() -> None:
                 for group in catalog.groups()
             ]
         print(json.dumps(grouping_metrics(predicted, labels["groups"]), indent=2))
+        return
+    if args.command == "evaluate-corrections":
+        report = evaluate_manual_corrections(args.report / "catalog.sqlite3")
+        destination = args.output or args.report / "group-correction-evaluation.json"
+        destination.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        print(f"分组纠正评测：{destination.resolve()}")
         return
     if args.command == "plan-files":
         manifest = json.loads(args.manifest.read_text())
