@@ -119,6 +119,18 @@ raw-curator undo file-audit.json
 计划中已有目标文件会标记为 `conflict` 并跳过，不会覆盖。`copy`、`hardlink` 和 `symlink`
 使用相同的预览、审计与撤销流程。
 
+## 本地验收
+
+实现完成与真实用户验收分开记录。下面的命令检查照片数量、缓存覆盖、失败任务、Criterion
+覆盖、真实反馈、人工分组纠正和个人模型；证据不足会明确输出 `missing`：
+
+```bash
+raw-curator acceptance reports/alaska-cache-validation --expected-photos 355
+```
+
+加入 `--group-labels grouping-labels.json` 后还会报告人工标注集上的分组 precision/recall。
+格式与验收边界见 `docs/ACCEPTANCE.md`。
+
 ## 隐私
 
 所有处理默认在本机完成。生成的报告只包含缩略图和分析数据。

@@ -140,4 +140,6 @@ RAW Photo Curator 的方向是：**用户定义明确规则，程序在本机学
 9. XMP 工作流集成
 10. 桌面应用封装
 
-下一项计划任务：**公开发布前，用真实人工反馈完成 Phase 2/5 的摄影师验收数据集。**
+下一项计划任务：**公开发布前，用真实人工反馈完成 Phase 2/5 的摄影师验收数据集。** 使用
+`raw-curator acceptance REPORT --expected-photos N --group-labels LABELS.json` 生成机器可读
+验收结果；实现完成不再被当作真实摄影师验收已经通过。

@@ -37,3 +37,7 @@ Optional local inference is explicit: install `.[vision]`, then run
 `raw-curator install-model face` and/or `raw-curator install-model aesthetic`. Downloads are pinned
 and checksum-verified. Face/eye/expression and NIMA results retain confidence and evidence; an
 occluded or undetected eye stays unknown instead of being mislabeled as a blink.
+
+Run `raw-curator acceptance REPORT --expected-photos N` for a machine-readable separation between
+implemented features, reproducible local evidence, and missing real-human validation. See
+[Roadmap acceptance](docs/ACCEPTANCE.md).

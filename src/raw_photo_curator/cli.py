@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
+from .acceptance import acceptance_report
 from .catalog import Catalog, fingerprint
 from .embedding import ColorGridEmbedding
 from .evaluation import grouping_metrics
@@ -153,6 +154,7 @@ def main() -> None:
     export = sub.add_parser("export", help="导出 JSON/CSV 选片清单")
     plan_xmp = sub.add_parser("plan-xmp", help="预览非破坏性 XMP sidecar 写入")
     install_model_command = sub.add_parser("install-model", help="下载并校验可选本地模型")
+    acceptance = sub.add_parser("acceptance", help="生成机器可读的本地 roadmap 验收报告")
     for item in (command, live):
         item.add_argument("folder", type=Path)
         item.add_argument("--output", type=Path, default=Path("reports/latest"))
@@ -174,6 +176,10 @@ def main() -> None:
     plan_xmp.add_argument("manifest", type=Path)
     plan_xmp.add_argument("--output", type=Path, default=Path("xmp-plan.json"))
     install_model_command.add_argument("model", choices=("face", "aesthetic"))
+    acceptance.add_argument("report", type=Path)
+    acceptance.add_argument("--expected-photos", type=int)
+    acceptance.add_argument("--group-labels", type=Path)
+    acceptance.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.command == "evaluate-groups":
         labels = json.loads(args.labels.read_text())
@@ -222,6 +228,20 @@ def main() -> None:
     if args.command == "install-model":
         installed = install_model(args.model)
         print(f"模型已安装并通过 SHA-256 校验：{installed}")
+        return
+    if args.command == "acceptance":
+        report = acceptance_report(
+            args.report,
+            expected_photos=args.expected_photos,
+            group_labels=args.group_labels,
+        )
+        rendered = json.dumps(report, ensure_ascii=False, indent=2)
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(rendered + "\n", encoding="utf-8")
+            print(f"验收报告：{args.output.resolve()}")
+        else:
+            print(rendered)
         return
     if not args.folder.is_dir():
         parser.error(f"照片文件夹不存在：{args.folder}")
