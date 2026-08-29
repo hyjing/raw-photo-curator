@@ -53,8 +53,9 @@ raw-curator serve /path/to/photos --output reports/live
 顶部可以切换 Travel、Portrait、Landscape、Wildlife 和 Custom 选片标准。Profile 的显式
 权重会直接改变推荐先验；硬规则始终先于本地学习偏好执行。
 
-“相似组”视图使用拍摄时间、相机序列、感知哈希和本地视觉描述符识别近似重复与连拍。
-组内照片支持同步缩放、最佳/淘汰反馈，以及持久化拆分和合并纠正。
+“连拍选最佳”使用拍摄时间、相机序列、感知哈希和本地视觉描述符识别近似重复与连拍。
+界面一次只显示一组；点击最想保留的一张后自动进入下一组，不要求用户理解聚类的合并、
+拆分等内部概念。底层分组纠正 API 仍保留给评测与高级工作流。
 
 可以复制 `docs/group-labels.example.json` 建立本地人工分组标注，并报告 pairwise
 precision、recall 和 F1：
