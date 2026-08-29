@@ -12,6 +12,13 @@ Measured on the local Alaska set (355 Sony ARW files):
 - optional YuNet + expression pass over the same previews: 8.07 seconds, with two real
   people-containing images detected and occluded eyes safely reported as unknown.
 
+Real local feedback evaluation on 2026-08-29 used 13 Travel decisions (10 keep, 3 reject). A
+deterministic stratified holdout retained 10 training photos and 3 test photos. The generic prior,
+explicit Travel profile, and personal ranker each scored 100% on the two available positive/negative
+test pairs (Top-5 hit rate 1.0, NDCG 1.0). Personalization therefore did not exceed either baseline;
+the sample is far too small for a general accuracy claim. The result is reproducible with
+`raw-curator evaluate-personal reports/alaska-cache-validation --profile travel`.
+
 These are development-machine measurements, not universal guarantees. First-time optional plugin
 backfill can take several minutes; subsequent runs reuse plugin-specific cache entries. Run the
 same folder twice and inspect the scan summary to reproduce the warm-cache result.

@@ -131,6 +131,12 @@ raw-curator acceptance reports/alaska-cache-validation --expected-photos 355
 加入 `--group-labels grouping-labels.json` 后还会报告人工标注集上的分组 precision/recall。
 格式与验收边界见 `docs/ACCEPTANCE.md`。
 
+真实反馈的个人排序留出评测不依赖正在运行的服务器：
+
+```bash
+raw-curator evaluate-personal reports/alaska-cache-validation --profile travel
+```
+
 ## 隐私
 
 所有处理默认在本机完成。生成的报告只包含缩略图和分析数据。

@@ -16,6 +16,7 @@ from .metadata import PhotoMetadata, extract_metadata, extract_raw_metrics, perc
 from .model_install import install_model
 from .models import Result
 from .objective import BuiltinObjectivePlugin
+from .personal_evaluation import evaluate_report_directory
 from .plugins import default_registry
 from .report import write_report
 from .scoring import explain, measure, scores
@@ -155,6 +156,7 @@ def main() -> None:
     plan_xmp = sub.add_parser("plan-xmp", help="预览非破坏性 XMP sidecar 写入")
     install_model_command = sub.add_parser("install-model", help="下载并校验可选本地模型")
     acceptance = sub.add_parser("acceptance", help="生成机器可读的本地 roadmap 验收报告")
+    personal_evaluation = sub.add_parser("evaluate-personal", help="离线复现个人排序留出评测")
     for item in (command, live):
         item.add_argument("folder", type=Path)
         item.add_argument("--output", type=Path, default=Path("reports/latest"))
@@ -180,6 +182,9 @@ def main() -> None:
     acceptance.add_argument("--expected-photos", type=int)
     acceptance.add_argument("--group-labels", type=Path)
     acceptance.add_argument("--output", type=Path)
+    personal_evaluation.add_argument("report", type=Path)
+    personal_evaluation.add_argument("--profile", default="travel")
+    personal_evaluation.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.command == "evaluate-groups":
         labels = json.loads(args.labels.read_text())
@@ -242,6 +247,14 @@ def main() -> None:
             print(f"验收报告：{args.output.resolve()}")
         else:
             print(rendered)
+        return
+    if args.command == "evaluate-personal":
+        report = evaluate_report_directory(args.report, args.profile)
+        destination = args.output or args.report / f"personal-evaluation-{args.profile}.json"
+        destination.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        print(f"个人排序评测：{destination.resolve()}")
         return
     if not args.folder.is_dir():
         parser.error(f"照片文件夹不存在：{args.folder}")

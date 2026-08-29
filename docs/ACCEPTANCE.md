@@ -32,6 +32,15 @@ real keep/reject feedback, a persisted group correction, a trained preference mo
 non-empty manual grouping label set. This distinction prevents simulated fixtures from being
 presented as photographer acceptance evidence.
 
+Generate a reproducible Phase 5 holdout report directly from the report directory:
+
+```bash
+raw-curator evaluate-personal reports/alaska-cache-validation --profile travel
+```
+
 Current Alaska evidence (2026-08-29): 355 photos, 100% catalog cache coverage, zero failed jobs,
-and 17 cached criteria. Human-feedback gates remain intentionally open until the photographer uses
-the review and group-correction interfaces.
+17 cached criteria, and 13 real Travel decisions. The stratified holdout used 10 training and 3
+test photos. All three scoring modes reached 100% pairwise accuracy over only two test pairs, so the
+tool truthfully reports that personalization has **not** exceeded the baseline. This is pipeline
+evidence, not a statistically strong product claim. Group-correction and manual grouping-label
+gates remain open.

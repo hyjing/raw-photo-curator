@@ -22,4 +22,18 @@ def test_local_evaluation_is_reproducible_and_reports_baselines():
     assert first["model_ready"]
     assert first["generic_prior"]["pairwise_accuracy"] == 1.0
     assert first["personal_ranker"]["ndcg"] == 1.0
-    assert [point["feedback_count"] for point in first["learning_curve"]] == [5, 10, 15, 15]
+    assert [point["feedback_count"] for point in first["learning_curve"]] == [5, 10, 16, 16]
+
+
+def test_holdout_remains_trainable_with_imbalanced_realistic_feedback():
+    results = [photo(index) for index in range(13)]
+    feedback = {
+        str(item.path): {"choice": "reject" if index < 3 else "keep"}
+        for index, item in enumerate(results)
+    }
+    priors = {str(item.path): item.keep_score for item in results}
+    report = evaluate_personalization(results, feedback, {}, priors, "travel")
+    assert report["training_count"] == 10
+    assert report["test_count"] == 3
+    assert report["model_ready"]
+    assert report["personal_ranker"]["pairwise_pairs"] == 2

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
+import sqlite3
+from hashlib import sha256
 from math import log2, sqrt
+from pathlib import Path
 
 import numpy as np
 
-from .models import Result
+from .catalog import Catalog
+from .models import Metrics, Result
+from .profiles import BUILTIN_PROFILES, weighted_score
 from .ranker import predict, train_pairwise
 
 
@@ -48,11 +54,12 @@ def evaluate_personalization(
     results: list[Result], feedback: dict[str, dict], contexts: dict[str, dict],
     priors: dict[str, float], profile_id: str,
 ) -> dict:
-    labeled = [item for item in results if feedback.get(str(item.path), {}).get("choice") in {"keep", "edit", "reject"}]
-    # Stable ordering makes the same local database produce the same report.
-    labeled.sort(key=lambda item: str(item.path))
-    train = [item for index, item in enumerate(labeled) if index % 4 != 0]
-    test = [item for index, item in enumerate(labeled) if index % 4 == 0]
+    labeled = [
+        item
+        for item in results
+        if feedback.get(str(item.path), {}).get("choice") in {"keep", "edit", "reject"}
+    ]
+    train, test = _stratified_holdout(labeled, feedback)
     train_feedback = {str(item.path): feedback[str(item.path)] for item in train}
     model = train_pairwise(train, train_feedback, contexts, profile_id)
     baseline_scores = {str(item.path): item.keep_score for item in test}
@@ -84,3 +91,77 @@ def evaluate_personalization(
         curves.append({"feedback_count": min(count, len(prefix)), "metrics": metrics})
     report["learning_curve"] = curves
     return report
+
+
+def _stratified_holdout(
+    labeled: list[Result], feedback: dict[str, dict]
+) -> tuple[list[Result], list[Result]]:
+    """Make a deterministic 25% holdout while preserving each available class."""
+    train: list[Result] = []
+    test: list[Result] = []
+    for positive in (True, False):
+        group = [
+            item
+            for item in labeled
+            if _positive(feedback[str(item.path)].get("choice")) is positive
+        ]
+        group.sort(
+            key=lambda item: sha256(str(item.path).encode("utf-8")).digest()
+        )
+        # Pairwise training needs two examples from each class. With fewer than
+        # three examples, keep the whole class in training and report no test pair.
+        holdout = max(1, round(len(group) * 0.25)) if len(group) >= 3 else 0
+        holdout = min(holdout, max(0, len(group) - 2))
+        test.extend(group[:holdout])
+        train.extend(group[holdout:])
+    train.sort(key=lambda item: str(item.path))
+    test.sort(key=lambda item: str(item.path))
+    return train, test
+
+
+def evaluate_report_directory(report_directory: Path, profile_id: str = "travel") -> dict:
+    """Reproduce the local holdout evaluation without requiring the web server."""
+    results_data = json.loads((report_directory / "results.json").read_text(encoding="utf-8"))
+    results = [
+        Result(
+            Path(item["path"]),
+            float(item["keep_score"]),
+            float(item["edit_score"]),
+            Metrics(**item["metrics"]),
+            tuple(item["notes"]),
+            str(item["thumbnail"]),
+        )
+        for item in results_data
+    ]
+    feedback_database = report_directory / "feedback.sqlite3"
+    with sqlite3.connect(feedback_database) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            "SELECT path, choice, rating, tags, note, updated_at FROM profile_feedback "
+            "WHERE profile_id = ?",
+            (profile_id,),
+        ).fetchall()
+    feedback = {str(row["path"]): dict(row) for row in rows}
+    profile = next((item for item in BUILTIN_PROFILES if item.id == profile_id), None)
+    if profile is None:
+        raise ValueError(f"offline evaluation currently requires a built-in profile: {profile_id}")
+    with Catalog(report_directory / "catalog.sqlite3") as catalog:
+        contexts = catalog.preference_contexts()
+        priors = {
+            str(result.path): weighted_score(
+                result, profile, catalog.criteria_for_path(str(result.path))
+            )
+            for result in results
+        }
+    evaluation = evaluate_personalization(results, feedback, contexts, priors, profile_id)
+    evaluation.update(
+        {
+            "schema": "raw-curator-personal-evaluation-v1",
+            "profile_id": profile_id,
+            "labeled_count": sum(
+                item.get("choice") in {"keep", "edit", "reject"}
+                for item in feedback.values()
+            ),
+        }
+    )
+    return evaluation

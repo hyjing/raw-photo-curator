@@ -58,6 +58,19 @@ def acceptance_report(
         ),
         "preference_model": _check(models > 0, models, "at least one trained profile model"),
     }
+    evaluation_paths = sorted(report_directory.glob("personal-evaluation-*.json"))
+    evaluation = None
+    if evaluation_paths:
+        evaluation = json.loads(evaluation_paths[-1].read_text(encoding="utf-8"))
+    checks["personal_evaluation"] = _check(
+        bool(
+            evaluation
+            and evaluation.get("test_count", 0) > 0
+            and isinstance(evaluation.get("personalization_improved"), bool)
+        ),
+        evaluation,
+        "reproducible holdout report that truthfully states whether personalization improved",
+    )
 
     grouping: dict[str, object] | None = None
     if group_labels is not None:
@@ -88,6 +101,7 @@ def acceptance_report(
         "blocking_checks": blocking,
         "checks": checks,
         "grouping_metrics": grouping,
+        "personal_evaluation": evaluation,
     }
 
 
