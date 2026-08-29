@@ -3,7 +3,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 root = Path(__file__).resolve().parents[1]
-source = Image.open(root / "docs/assets/demo.png").convert("RGB")
+source = Image.open(root / "docs/assets/top5.png").convert("RGB")
 frames = []
 for index in range(12):
     progress = index / 11

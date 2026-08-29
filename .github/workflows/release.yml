@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Artifact version (for example v0.2.0)
+        required: true
+        default: v0.2.0
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install build dependencies
+        run: python -m venv .venv && .venv/bin/pip install -e '.[packaging,vision]'
+      - name: Build app, DMG, ZIP and checksums
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: ./scripts/package_macos_release.sh "${{ github.event.inputs.version || github.ref_name }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RAWPhotoCurator-macOS
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/SHA256SUMS
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.dmg
+            dist/*.zip
+            dist/SHA256SUMS

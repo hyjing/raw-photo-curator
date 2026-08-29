@@ -19,6 +19,13 @@ collection = COLLECT(exe, a.binaries, a.datas, name="RAWPhotoCurator")
 app = BUNDLE(
     collection,
     name="RAWPhotoCurator.app",
+    icon=str(root / "build/RAWPhotoCurator.icns"),
     bundle_identifier="io.github.hyjing.raw-photo-curator",
-    info_plist={"NSHighResolutionCapable": True},
+    info_plist={
+        "CFBundleDisplayName": "RAW Photo Curator",
+        "CFBundleName": "RAW Photo Curator",
+        "CFBundleShortVersionString": "0.2.0",
+        "NSHighResolutionCapable": True,
+        "NSHumanReadableCopyright": "Copyright © 2026 RAW Photo Curator contributors",
+    },
 )

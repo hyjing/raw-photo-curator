@@ -11,3 +11,14 @@ def test_group_review_is_single_choice_sequential_flow():
     assert "合并选中组" not in APP_HTML
     assert "把勾选照片拆成新组" not in APP_HTML
     assert "同步缩放" not in APP_HTML
+
+
+def test_main_workflow_has_native_folder_and_finish_actions():
+    assert "在 Finder 中选择…" in APP_HTML
+    assert "/api/folder-picker" in APP_HTML
+    assert "完成选片" in APP_HTML
+    assert "复制保留照片到文件夹…" in APP_HTML
+    assert "生成 XMP 标记" in APP_HTML
+    assert "/api/completion" in APP_HTML
+    assert "/api/finalize" in APP_HTML
+    assert "复制会保留原始 RAW 不变" in APP_HTML

@@ -1,6 +1,8 @@
 import json
 import mimetypes
 import sqlite3
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -20,6 +22,7 @@ from .plugins import default_registry
 from .profiles import BUILTIN_PROFILES, METRIC_IDS, Profile, hard_rule_reasons, weighted_score
 from .ranker import PreferenceModel, contributions, learned_weight, predict, train_pairwise
 from .recommendation import recommendation_scores
+from .workflow import apply_actions, export_selection, plan_file_actions, plan_xmp_actions
 
 CHOICES = {"keep", "edit", "reject", "maybe", None}
 
@@ -373,6 +376,46 @@ def _summary(database: Path, results: list[Result]) -> dict[str, int]:
     return counts
 
 
+def _completion_payload(database: Path, results: list[Result]) -> dict[str, object]:
+    profile = _active_profile(database)
+    feedback = _read_feedback(database, profile.id)
+    available = {str(result.path) for result in results}
+    selected = [
+        path
+        for path, item in feedback.items()
+        if path in available and item.get("choice") in {"keep", "edit"}
+    ]
+    rejected = [
+        path
+        for path, item in feedback.items()
+        if path in available and item.get("choice") == "reject"
+    ]
+    return {
+        "profile_id": profile.id,
+        "selected": selected,
+        "selected_count": len(selected),
+        "rejected_count": len(rejected),
+        "reviewed_count": len(selected) + len(rejected),
+        "unreviewed_count": max(0, len(results) - len(selected) - len(rejected)),
+    }
+
+
+def _choose_macos_folder(prompt: str) -> Path | None:
+    if sys.platform != "darwin":
+        raise RuntimeError("native folder picker currently requires macOS")
+    escaped = prompt.replace('"', "'")
+    selection = subprocess.run(
+        ["osascript", "-e", f'POSIX path of (choose folder with prompt "{escaped}")'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if selection.returncode != 0 or not selection.stdout.strip():
+        return None
+    folder = Path(selection.stdout.strip()).expanduser().resolve()
+    return folder if folder.is_dir() else None
+
+
 def make_handler(state: SessionState, database: Path):
     class Handler(BaseHTTPRequestHandler):
         def _json(self, value: object, status: HTTPStatus = HTTPStatus.OK) -> None:
@@ -420,6 +463,8 @@ def make_handler(state: SessionState, database: Path):
                     "summary": _summary(database, state.results),
                     "active_profile": _active_profile(database).id,
                 })
+            elif route == "/api/completion":
+                self._json(_completion_payload(database, state.results))
             elif route == "/api/profiles":
                 active = _active_profile(database)
                 self._json({
@@ -511,6 +556,12 @@ def make_handler(state: SessionState, database: Path):
             route = urlparse(self.path).path
             if route == "/api/folder":
                 self._change_folder()
+                return
+            if route == "/api/folder-picker":
+                self._pick_folder()
+                return
+            if route == "/api/finalize":
+                self._finalize_selection()
                 return
             if route == "/api/more":
                 self._load_more()
@@ -660,6 +711,72 @@ def make_handler(state: SessionState, database: Path):
                 self._json({"ok": True, "count": len(new_results), "folder": str(folder)})
             except (ValueError, KeyError, json.JSONDecodeError):
                 self._json({"ok": False, "error": "无效的文件夹路径"}, HTTPStatus.BAD_REQUEST)
+
+        def _pick_folder(self) -> None:
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                data = json.loads(self.rfile.read(min(size, 16_384))) if size else {}
+                purpose = str(data.get("purpose", "photos"))
+                prompt = (
+                    "选择保存保留照片的文件夹"
+                    if purpose == "export"
+                    else "选择包含 RAW / JPG 照片的文件夹"
+                )
+                selected = _choose_macos_folder(prompt)
+                self._json(
+                    {"ok": selected is not None, "cancelled": selected is None,
+                     "folder": str(selected) if selected else None}
+                )
+            except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+                self._json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+        def _finalize_selection(self) -> None:
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                if not 0 < size <= 16_384:
+                    raise ValueError("invalid body size")
+                data = json.loads(self.rfile.read(size))
+                action = str(data["action"])
+                profile = _active_profile(database)
+                feedback = _read_feedback(database, profile.id)
+                active = {str(result.path) for result in state.results}
+                scoped = {path: item for path, item in feedback.items() if path in active}
+                selected = [
+                    path for path, item in scoped.items()
+                    if item.get("choice") in {"keep", "edit"}
+                ]
+                if not selected:
+                    raise ValueError("还没有保留照片")
+                export_root = state.output / "exports"
+                stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+                manifest = export_selection(
+                    scoped, export_root / f"selection-{profile.id}-{stamp}.json", "json"
+                )
+                if action == "copy":
+                    destination = Path(str(data["destination"])).expanduser().resolve()
+                    if not destination.is_dir():
+                        raise ValueError("导出文件夹不存在")
+                    actions = plan_file_actions(selected, destination, "copy")
+                    audit = apply_actions(actions, export_root / f"copy-audit-{stamp}.json")
+                    conflicts = sum(item.status == "conflict" for item in actions)
+                    if sys.platform == "darwin":
+                        subprocess.Popen(["open", str(destination)])
+                elif action == "xmp":
+                    actions = plan_xmp_actions(scoped)
+                    audit = apply_actions(actions, export_root / f"xmp-audit-{stamp}.json")
+                    conflicts = sum(item.status == "conflict" for item in actions)
+                else:
+                    raise ValueError("unsupported finalization action")
+                self._json({
+                    "ok": True,
+                    "action": action,
+                    "created": len(audit["actions"]),
+                    "conflicts": conflicts,
+                    "manifest": str(manifest),
+                    "audit": str(export_root / f"{action}-audit-{stamp}.json"),
+                })
+            except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                self._json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
         def _load_more(self) -> None:
             new_results = state.analyzer(
@@ -1001,16 +1118,17 @@ APP_HTML = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <style>
 :root{color-scheme:dark;--bg:#090b10;--surface:#11141b;--surface2:#181c24;--line:#262b36;--text:#f4f5f7;--muted:#9198a6;--accent:#7cf3ad;--danger:#ff8585}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% -10%,#1c2730 0,transparent 32%),var(--bg);color:var(--text);font:15px Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input{font:inherit}
 header{position:sticky;top:0;z-index:5;padding:18px 4vw 16px;border-bottom:1px solid #ffffff0f;background:#090b10de;backdrop-filter:blur(20px)}.topline{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.brand{display:flex;align-items:center;gap:11px}.mark{display:grid;place-items:center;width:34px;height:34px;border-radius:11px;background:linear-gradient(145deg,#83f7b4,#58bfff);color:#07100b;font-weight:900}.brand h1{font-size:17px;letter-spacing:-.02em;margin:0}.brand small{display:block;color:var(--muted);font-size:11px;margin-top:2px}.meta{display:flex;gap:8px}.chip{padding:6px 10px;border:1px solid var(--line);border-radius:999px;color:#b9bec8;background:#ffffff05;font-size:12px}
-.controls{display:grid;grid-template-columns:minmax(280px,1fr) auto auto;gap:10px}.pathbox{display:flex;align-items:center;gap:9px;padding:0 13px;border:1px solid var(--line);border-radius:12px;background:#0d1016;transition:.2s}.pathbox:focus-within{border-color:#65d998;box-shadow:0 0 0 3px #65d99814}.pathbox span{color:#697181}input{width:100%;border:0;outline:0;background:transparent;color:var(--text);padding:12px 0}select,button{border:1px solid var(--line);background:#20252f;color:var(--text);border-radius:11px;padding:10px 14px;cursor:pointer;transition:.18s}button:hover{border-color:#4c5565;transform:translateY(-1px)}button:disabled{opacity:.5;cursor:default;transform:none}#start{background:var(--text);color:#0b0d11;border:0;font-weight:750;padding-inline:20px}.activity{display:flex;align-items:center;gap:12px;min-height:20px;margin-top:10px}progress{width:180px;height:5px;border:0;accent-color:var(--accent)}#status{color:var(--muted);font-size:12px}
+.controls{display:grid;grid-template-columns:minmax(260px,1fr) auto auto auto;gap:10px}.pathbox{display:flex;align-items:center;gap:9px;padding:0 13px;border:1px solid var(--line);border-radius:12px;background:#0d1016;transition:.2s}.pathbox:focus-within{border-color:#65d998;box-shadow:0 0 0 3px #65d99814}.pathbox span{color:#697181}input{width:100%;border:0;outline:0;background:transparent;color:var(--text);padding:12px 0}select,button{border:1px solid var(--line);background:#20252f;color:var(--text);border-radius:11px;padding:10px 14px;cursor:pointer;transition:.18s}button:hover{border-color:#4c5565;transform:translateY(-1px)}button:disabled{opacity:.5;cursor:default;transform:none}#chooseFolder{background:#1c372b;border-color:#3a7655;color:#caffe0;font-weight:700}#start{background:var(--text);color:#0b0d11;border:0;font-weight:750;padding-inline:20px}.activity{display:flex;align-items:center;gap:12px;min-height:20px;margin-top:10px}progress{width:180px;height:5px;border:0;accent-color:var(--accent)}#status{color:var(--muted);font-size:12px}
 main{max-width:1540px;margin:auto;padding:28px 4vw 60px}.grid{display:grid;grid-template-columns:1fr;gap:26px}.card{position:relative;display:grid;grid-template-columns:minmax(0,1.8fr) minmax(350px,.82fr);background:linear-gradient(145deg,#171b23,#11141a);border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:0 18px 60px #0005}.card.kept{border-color:#56d88d;box-shadow:0 18px 60px #0005,0 0 0 1px #56d88d55}.rank{position:absolute;z-index:2;top:14px;left:14px;padding:7px 10px;border:1px solid #ffffff26;border-radius:10px;background:#07090ba8;backdrop-filter:blur(12px);font-weight:800}.photo-wrap{position:relative;display:grid;place-items:center;min-height:470px;background:linear-gradient(145deg,#08090c,#0e1116)}.card img{display:block;width:100%;height:100%;max-height:72vh;object-fit:contain}.body{display:flex;flex-direction:column;padding:23px}.eyebrow{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.title-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:5px}.name{font-size:18px;font-weight:750;overflow-wrap:anywhere}.rotate{position:absolute;z-index:2;top:14px;right:14px;padding:9px 13px;white-space:nowrap;background:#07090bc7;border-color:#ffffff2b;backdrop-filter:blur(12px);box-shadow:0 5px 18px #0006}.rotate:hover{background:#20252ee8}.score{display:flex;gap:9px;margin:16px 0 12px}.score span{display:flex;flex-direction:column;gap:2px;flex:1;padding:10px 12px;border:1px solid var(--line);border-radius:12px;color:var(--muted);font-size:11px;background:#0b0e13}.score strong{font-size:22px;color:var(--text);line-height:1.1}.reason{min-height:44px;color:#c8ccd4;line-height:1.55}.evidence{display:flex;gap:5px;flex-wrap:wrap}.evidence span{padding:4px 7px;border-radius:7px;background:#ffffff08;color:#aeb5c0;font-size:10px}.evidence .unknown{color:#ffcf87}.radar{display:block;width:100%;max-width:280px;margin:auto}.radar .gridline{fill:none;stroke:#343a46;stroke-width:1}.radar .axis{stroke:#2b303a}.radar .shape{fill:#72eca535;stroke:#72eca5;stroke-width:2}.radar text{fill:#aeb4bf;font:11px system-ui}.actions{display:grid;grid-template-columns:1.25fr 1fr;gap:9px;margin-top:auto;padding-top:14px}.actions button{font-weight:700}.keep{background:#22633e;border-color:#388d5b}.keep:hover{background:#2b784b}.reject{background:#302328;border-color:#5a343d;color:#ffc4c4}.reject:hover{background:#48282f}.badge{color:var(--accent);font-size:12px;margin-top:9px}
 @media(max-width:900px){header{position:relative}.card{grid-template-columns:1fr}.photo-wrap{min-height:0}.card img{max-height:none;aspect-ratio:3/2}.radar{max-width:250px}}@media(max-width:640px){.controls{grid-template-columns:1fr}.topline{align-items:flex-start}.meta{flex-direction:column}.card{border-radius:15px}.body{padding:18px}}
 .group-panel{position:fixed;inset:0;z-index:20;display:none;background:#07090bf2;backdrop-filter:blur(16px);overflow:auto;padding:24px 4vw 60px}.group-panel.open{display:block}.group-toolbar{position:sticky;top:0;z-index:3;display:flex;align-items:center;gap:12px;padding:12px 0 18px;background:#07090bf2}.group-toolbar h2{margin:0}.group-progress{margin-right:auto;color:var(--muted);font-size:12px}.group-list{max-width:1400px;margin:auto}.similarity-group{padding:20px;border:1px solid var(--line);border-radius:18px;background:var(--surface)}.group-head{display:flex;gap:10px;align-items:center;margin-bottom:16px}.group-head strong{margin-right:auto}.member-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}.member-card{position:relative}.member-choice{position:relative;display:block;width:100%;overflow:hidden;padding:0;border:1px solid var(--line);border-radius:14px;background:#050608;aspect-ratio:3/2}.member-choice:hover{border-color:var(--accent);transform:translateY(-2px)}.member-choice img{width:100%;height:100%;object-fit:contain}.member-choice span{position:absolute;left:10px;right:10px;bottom:10px;padding:8px 10px;border-radius:9px;background:#050608dc;color:var(--text);text-align:left}.group-rotate{position:absolute;z-index:2;top:9px;right:9px;padding:7px 10px;background:#050608d9;border-color:#ffffff35;box-shadow:0 4px 15px #0007}.group-done{display:grid;place-items:center;min-height:50vh;color:var(--muted);font-size:18px}
 .settings-panel{position:fixed;inset:0;z-index:30;display:none;place-items:center;background:#05070acc;backdrop-filter:blur(14px);padding:20px}.settings-panel.open{display:grid}.settings-card{width:min(760px,96vw);max-height:88vh;overflow:auto;padding:22px;border:1px solid var(--line);border-radius:20px;background:#12161d}.settings-head{display:flex;align-items:center}.settings-head h2{margin:0 auto 5px 0}.plugin-list{display:grid;gap:10px;margin-top:15px}.plugin-card{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:start;padding:14px;border:1px solid var(--line);border-radius:13px;background:#0b0e13}.plugin-card input{width:auto}.plugin-card strong{display:block}.plugin-card p{margin:5px 0;color:var(--muted);font-size:12px;line-height:1.45}.plugin-meta{display:flex;gap:6px;flex-wrap:wrap}.plugin-meta span{padding:3px 6px;border-radius:6px;background:#ffffff08;color:#abb1bc;font-size:10px}.unavailable{color:#ffba82;font-size:11px}
 .custom-editor,.model-editor{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}.custom-editor h3,.model-editor h3{margin:0 0 10px}.weight-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px}.weight-row{display:grid;grid-template-columns:1fr 80px;gap:8px;align-items:center;color:#bcc2cc;font-size:12px}.weight-row input{padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#090c11}.custom-editor button,.model-editor button{margin-top:12px}.model-status{color:var(--muted);line-height:1.6;font-size:12px}.model-actions{display:flex;gap:8px;flex-wrap:wrap}.model-actions input{display:none}
-</style><header><div class="topline"><div class="brand"><div class="mark">R</div><div><h1>RAW Photo Curator</h1><small>Local-first photo selection</small></div></div><div class="meta"><span class="chip" id="round">第 1 轮</span><span class="chip" id="summary">尚未选择</span></div></div><div class="controls"><label class="pathbox"><span>⌁</span><input id="folder" aria-label="本地照片文件夹" placeholder="输入包含 ARW / JPG 的照片文件夹"></label><select id="profile" aria-label="选片标准"></select><div><button id="settingsButton">标准设置</button> <button id="groupsButton">连拍选最佳</button> <button id="cancel" hidden>取消</button> <button id="start">生成 Top 5</button></div></div><div class="activity"><progress id="progress" value="0" max="100" hidden></progress><span id="status">输入本地照片路径，分析结果只保存在这台设备</span></div></header>
-<main><div class="grid" id="grid"></div></main><section class="group-panel" id="groupPanel"><div class="group-toolbar"><h2>选出这一组最好的照片</h2><span class="group-progress" id="groupProgress"></span><button id="closeGroups">关闭</button></div><div class="group-list" id="groupList"></div></section><section class="settings-panel" id="settingsPanel"><div class="settings-card"><div class="settings-head"><div><h2>分析标准</h2><span id="settingsHint">所有分析默认在本机完成</span></div><button id="closeSettings">关闭</button></div><div class="plugin-list" id="pluginList"></div><div class="custom-editor" id="customEditor"></div><div class="model-editor" id="modelEditor"></div></div></section>
+.finish-panel{position:fixed;inset:0;z-index:40;display:none;place-items:center;background:#05070add;backdrop-filter:blur(18px);padding:20px}.finish-panel.open{display:grid}.finish-card{width:min(720px,96vw);padding:26px;border:1px solid #344039;border-radius:22px;background:linear-gradient(145deg,#171d1a,#10141a);box-shadow:0 28px 90px #000a}.finish-head{display:flex;align-items:start;gap:16px}.finish-head div{margin-right:auto}.finish-head h2{margin:0 0 6px;font-size:25px}.finish-head p{margin:0;color:var(--muted);line-height:1.6}.finish-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:22px 0}.finish-stat{padding:15px;border:1px solid var(--line);border-radius:14px;background:#090c10;color:var(--muted);font-size:12px}.finish-stat strong{display:block;margin-top:4px;color:var(--text);font-size:26px}.finish-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}.finish-actions button{padding:14px;font-weight:750}.finish-actions .primary{background:#27734a;border-color:#409a67}.finish-note{margin:15px 0 0;color:var(--muted);font-size:12px;line-height:1.55}.finish-result{min-height:22px;margin-top:14px;color:#bfffd5;font-size:13px;overflow-wrap:anywhere}
+</style><header><div class="topline"><div class="brand"><div class="mark">R</div><div><h1>RAW Photo Curator</h1><small>Local-first photo selection</small></div></div><div class="meta"><span class="chip" id="round">第 1 轮</span><span class="chip" id="summary">尚未选择</span></div></div><div class="controls"><label class="pathbox"><span>⌁</span><input id="folder" aria-label="本地照片文件夹" placeholder="选择包含 ARW / JPG 的照片文件夹"></label><button id="chooseFolder">在 Finder 中选择…</button><select id="profile" aria-label="选片标准"></select><div><button id="settingsButton">标准设置</button> <button id="groupsButton">连拍选最佳</button> <button id="finishButton">完成选片</button> <button id="cancel" hidden>取消</button> <button id="start">重新分析</button></div></div><div class="activity"><progress id="progress" value="0" max="100" hidden></progress><span id="status">点击“在 Finder 中选择”，照片不会离开这台设备</span></div></header>
+<main><div class="grid" id="grid"></div></main><section class="group-panel" id="groupPanel"><div class="group-toolbar"><h2>选出这一组最好的照片</h2><span class="group-progress" id="groupProgress"></span><button id="closeGroups">关闭</button></div><div class="group-list" id="groupList"></div></section><section class="settings-panel" id="settingsPanel"><div class="settings-card"><div class="settings-head"><div><h2>分析标准</h2><span id="settingsHint">所有分析默认在本机完成</span></div><button id="closeSettings">关闭</button></div><div class="plugin-list" id="pluginList"></div><div class="custom-editor" id="customEditor"></div><div class="model-editor" id="modelEditor"></div></div></section><section class="finish-panel" id="finishPanel"><div class="finish-card"><div class="finish-head"><div><h2>选片完成</h2><p>评价已自动保存。现在可以把保留的原始照片交给下一步工作流。</p></div><button id="closeFinish">关闭</button></div><div class="finish-stats"><div class="finish-stat">保留<strong id="finishKept">0</strong></div><div class="finish-stat">淘汰<strong id="finishRejected">0</strong></div><div class="finish-stat">尚未评价<strong id="finishUnreviewed">0</strong></div></div><div class="finish-actions"><button class="primary" id="copySelection">复制保留照片到文件夹…</button><button id="xmpSelection">生成 XMP 标记</button></div><p class="finish-note">复制会保留原始 RAW 不变；XMP 会在原片旁创建兼容 Lightroom / Capture One 的 sidecar。两种操作都会生成可撤销的审计记录。</p><div class="finish-result" id="finishResult"></div></div></section>
 <script>
-const folder=document.getElementById('folder'),profile=document.getElementById('profile'),start=document.getElementById('start'),cancel=document.getElementById('cancel'),bar=document.getElementById('progress'),statusEl=document.getElementById('status'),grid=document.getElementById('grid'),roundEl=document.getElementById('round'),summaryEl=document.getElementById('summary');
+const folder=document.getElementById('folder'),profile=document.getElementById('profile'),start=document.getElementById('start'),cancel=document.getElementById('cancel'),bar=document.getElementById('progress'),statusEl=document.getElementById('status'),grid=document.getElementById('grid'),roundEl=document.getElementById('round'),summaryEl=document.getElementById('summary'),chooseFolder=document.getElementById('chooseFolder');
 const groupPanel=document.getElementById('groupPanel'),groupList=document.getElementById('groupList'),groupProgress=document.getElementById('groupProgress');let groupsData=[],groupIndex=0;
 const settingsPanel=document.getElementById('settingsPanel'),pluginList=document.getElementById('pluginList');
 const escapeHTML=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
@@ -1027,6 +1145,7 @@ grid.onclick=async e=>{const pathValue=e.target.dataset.path;if(!pathValue)retur
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function followJob(){while(true){const p=await(await fetch('/api/progress')).json();if(p.total)bar.value=p.current/p.total*100;if(p.stage==='ranking')statusEl.textContent='正在根据反馈生成 Top 5…';else if(p.running)statusEl.textContent=`正在分析 ${p.current} / ${p.total}（${p.total?Math.round(p.current/p.total*100):0}%）`;if(!p.running){if(p.stage==='done'){await loadCandidates();statusEl.textContent=`已分析 ${p.total} 张 · 缓存 ${p.cache_hits} · 新分析 ${p.cache_misses}${p.failed?` · 跳过 ${p.failed}`:''}`}else if(p.stage==='cancelled')statusEl.textContent='已取消；下次会从缓存进度继续';else statusEl.textContent=p.error||'分析失败';break}await wait(350)}}
 start.onclick=async()=>{start.disabled=true;cancel.disabled=false;cancel.hidden=false;bar.hidden=false;bar.value=0;statusEl.textContent='正在建立本地照片索引…';try{const d=await(await fetch('/api/recommendations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:folder.value})})).json();if(d.ok)await followJob();else statusEl.textContent=d.error||'分析失败'}finally{bar.value=100;setTimeout(()=>bar.hidden=true,1000);cancel.hidden=true;start.disabled=false}};
+chooseFolder.onclick=async()=>{chooseFolder.disabled=true;statusEl.textContent='正在打开 Finder…';try{const d=await(await fetch('/api/folder-picker',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({purpose:'photos'})})).json();if(d.ok){folder.value=d.folder;statusEl.textContent='已选择照片文件夹，开始本地分析…';start.click()}else if(!d.cancelled)statusEl.textContent=d.error||'无法打开文件夹选择器';else statusEl.textContent='已取消选择'}finally{chooseFolder.disabled=false}};
 cancel.onclick=async()=>{cancel.disabled=true;await fetch('/api/cancel',{method:'POST'});statusEl.textContent='正在安全停止…'};
 profile.onchange=async()=>{profile.disabled=true;const d=await(await fetch('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile_id:profile.value})})).json();if(d.ok){render(d.candidates);statusEl.textContent=`已切换到 ${profile.options[profile.selectedIndex].text} 标准并重新排序`}profile.disabled=false};
 function renderGroup(){if(groupIndex>=groupsData.length){groupProgress.textContent=`已完成 ${groupsData.length} 组`;groupList.innerHTML='<div class="group-done">全部完成，可以关闭了</div>';return}const g=groupsData[groupIndex];groupProgress.textContent=`${groupIndex+1} / ${groupsData.length}`;groupList.innerHTML=`<article class="similarity-group"><div class="group-head"><strong>${g.type==='duplicate'?'近似重复':'连拍'} · ${g.members.length} 张</strong><span>点击你最想保留的一张</span></div><div class="member-grid">${g.members.map(m=>{const name=escapeHTML(m.path.split('/').pop());return `<div class="member-card"><button class="member-choice" data-photo="${m.id}" data-feedback-group="${g.id}" aria-label="选 ${name} 为最佳"><img src="${m.thumbnail||''}" alt="${name}"><span>${name} · 选为最佳</span></button><button class="group-rotate" data-rotate-path="${encodeURIComponent(m.path)}" aria-label="旋转 ${name}">↻ 旋转</button></div>`}).join('')}</div></article>`}
@@ -1036,5 +1155,9 @@ groupList.onclick=async e=>{const rotate=e.target.closest('[data-rotate-path]');
 async function loadPlugins(){const [d,pd,md,ed]=await Promise.all([fetch('/api/plugins').then(r=>r.json()),fetch('/api/profiles').then(r=>r.json()),fetch('/api/model').then(r=>r.json()),fetch('/api/evaluation').then(r=>r.json())]);pluginList.innerHTML=d.plugins.map(p=>`<label class="plugin-card"><input type="checkbox" data-plugin="${p.id}" ${p.enabled?'checked':''} ${p.id==='builtin.objective'||p.availability!=='ready'?'disabled':''}><div><strong>${escapeHTML(p.name)}</strong><p>${escapeHTML(p.description)}</p><div class="plugin-meta"><span>${p.runtime_cost}</span><span>${p.download_size_mb?p.download_size_mb+' MB':'无需下载'}</span><span>${escapeHTML(p.privacy)}</span></div>${p.availability!=='ready'?`<div class="unavailable">未安装 · ${escapeHTML(p.install_hint||p.unavailable_reason)}</div>`:''}</div><span>${p.criteria.length} 项</span></label>`).join('');const custom=pd.profiles.find(p=>p.id==='custom');document.getElementById('customEditor').innerHTML=`<h3>Custom Profile 权重</h3><div class="weight-grid">${Object.entries(custom.weights).map(([key,value])=>`<label class="weight-row"><span>${escapeHTML(key)}</span><input type="number" min="0" max="1" step=".01" value="${value}" data-weight="${key}"></label>`).join('')}</div><button id="saveWeights">保存 Custom 权重</button>`;document.getElementById('saveWeights').onclick=saveCustomWeights;const model=document.getElementById('modelEditor'),evaluation=ed.test_count?`<br>本地留出 ${ed.test_count} 张 · 个人 Pairwise ${Math.round(ed.personal_ranker.pairwise_accuracy*100)}% · 显式基线 ${Math.round(ed.explicit_profile.pairwise_accuracy*100)}% · NDCG ${ed.personal_ranker.ndcg}${ed.personalization_improved?' · 已超过基线':' · 尚未超过基线'}`:'';model.innerHTML=`<h3>本地偏好模型</h3><div class="model-status">${md.ready?`${md.model.training_count} 条反馈 · 训练对一致率 ${Math.round(md.model.validation_accuracy*100)}% · 当前参与排序 ${Math.round(md.learned_weight*100)}%`:'至少需要 2 张保留和 2 张淘汰；此前使用显式标准与通用先验。'}${evaluation}</div><div class="model-actions"><button id="exportModel" ${md.ready?'':'disabled'}>导出模型</button><label><button id="importModel">导入模型</button><input id="modelFile" type="file" accept="application/json"></label><button id="resetModel">重置当前标准</button></div>`;document.getElementById('exportModel').onclick=()=>{if(!md.model)return;const link=document.createElement('a');link.href=URL.createObjectURL(new Blob([JSON.stringify(md.model,null,2)],{type:'application/json'}));link.download=`raw-curator-${md.profile_id}-model.json`;link.click()};document.getElementById('importModel').onclick=()=>document.getElementById('modelFile').click();document.getElementById('modelFile').onchange=async e=>{const data=JSON.parse(await e.target.files[0].text());const r=await(await fetch('/api/model/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})).json();statusEl.textContent=r.ok?'模型已导入并重新排序':r.error;if(r.ok){await loadCandidates();await loadPlugins()}};document.getElementById('resetModel').onclick=async()=>{const r=await(await fetch('/api/model/reset',{method:'POST'})).json();if(r.ok){statusEl.textContent='当前标准的反馈与个人模型已重置';await loadCandidates();await loadPlugins()}};settingsPanel.classList.add('open')}
 async function saveCustomWeights(){const weights=Object.fromEntries([...document.querySelectorAll('[data-weight]')].map(input=>[input.dataset.weight,Number(input.value)]));const d=await(await fetch('/api/profile/custom',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({weights})})).json();statusEl.textContent=d.ok?'Custom 权重已保存并重新排序':d.error}
 document.getElementById('settingsButton').onclick=loadPlugins;document.getElementById('closeSettings').onclick=()=>settingsPanel.classList.remove('open');pluginList.onchange=async e=>{const id=e.target.dataset.plugin;if(!id)return;e.target.disabled=true;const d=await(await fetch('/api/plugin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plugin_id:id,enabled:e.target.checked})})).json();statusEl.textContent=d.ok?(e.target.checked?'标准已启用，点击“生成 Top 5”补充分析':'标准已关闭'):d.error;if(!d.ok)e.target.checked=!e.target.checked;e.target.disabled=false};
+const finishPanel=document.getElementById('finishPanel'),finishResult=document.getElementById('finishResult'),copySelection=document.getElementById('copySelection'),xmpSelection=document.getElementById('xmpSelection');
+async function showFinish(){const d=await(await fetch('/api/completion')).json();document.getElementById('finishKept').textContent=d.selected_count;document.getElementById('finishRejected').textContent=d.rejected_count;document.getElementById('finishUnreviewed').textContent=d.unreviewed_count;copySelection.disabled=xmpSelection.disabled=d.selected_count===0;finishResult.textContent=d.selected_count?'选择一种交付方式，之后仍可继续选片。':'请先至少保留一张照片。';finishPanel.classList.add('open')}
+async function finalize(action,destination){copySelection.disabled=xmpSelection.disabled=true;finishResult.textContent=action==='copy'?'正在复制保留的原始照片…':'正在生成 XMP sidecar…';try{const d=await(await fetch('/api/finalize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,destination})})).json();finishResult.textContent=d.ok?`${action==='copy'?'已复制':'已生成'} ${d.created} 个文件${d.conflicts?`，跳过 ${d.conflicts} 个同名冲突`:''}。审计记录：${d.audit}`:d.error||'操作失败'}finally{copySelection.disabled=xmpSelection.disabled=false}}
+document.getElementById('finishButton').onclick=showFinish;document.getElementById('closeFinish').onclick=()=>finishPanel.classList.remove('open');copySelection.onclick=async()=>{const d=await(await fetch('/api/folder-picker',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({purpose:'export'})})).json();if(d.ok)await finalize('copy',d.folder);else if(!d.cancelled)finishResult.textContent=d.error};xmpSelection.onclick=()=>finalize('xmp');
 loadProfiles();loadCandidates();
 </script></html>"""

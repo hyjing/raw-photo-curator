@@ -2,142 +2,94 @@
 
 ![RAW Photo Curator Alaska Top 5 演示](docs/assets/demo.gif)
 
-[English](README_EN.md) · 中文
+| 动态 Top 5 | 连拍选最佳 | 明确的选片终点 |
+| --- | --- | --- |
+| ![大图 Top 5 与可解释评分](docs/assets/top5.png) | ![连拍组内选最佳](docs/assets/burst-review.png) | ![复制保留照片或生成 XMP](docs/assets/finish.png) |
 
-一个本地优先的 RAW/照片选片工具。它扫描文件夹，为每张照片分别计算：
+中文 · [English](README_EN.md)
 
-- **保留分**：清晰度、曝光、构图代理指标与独特性
-- **调色潜力**：高光/阴影保留、对比度与主体可用性
+本地优先、可解释的 RAW 选片工具。直接在 Finder 选择 Sony ARW 或普通照片文件夹，获得
+Top 5 推荐；你只需保留或淘汰，轻量的本地排序模型会逐步学习个人偏好。照片、预览、评分
+和反馈都留在你的 Mac 上。
 
-当前版本是可解释的 MVP，不上传照片，也不会删除或移动原片。支持 Sony ARW（通过
-LibRaw/rawpy）以及 JPEG、PNG、TIFF。
+> 当前为 private alpha。首个可下载 macOS 版本由 Release workflow 自动打包；下载版用户
+> 不需要安装 Python。
 
-项目方向和架构边界见 [ROADMAP.md](ROADMAP.md) 与 [DESIGN.md](DESIGN.md)。
+## 下载 macOS 版
 
-## 安装
+[下载最新版本](https://github.com/hyjing/raw-photo-curator/releases/latest)，打开 DMG 后把
+**RAW Photo Curator** 拖入 Applications。正式签名和公证完成前，macOS 可能需要按住
+Control 点击应用并选择“打开”。详情见[发布与签名说明](docs/RELEASE.md)。
+
+## 三步完成选片
+
+1. 点击**在 Finder 中选择**，选一个包含 ARW、JPEG、PNG 或 TIFF 的文件夹。程序会自动
+   开始分析；再次打开同一批照片时直接使用本地缓存。
+2. 查看大图 Top 5。淘汰会立即由下一张推荐补位；保留满 5 张后完成一轮，个人偏好模型
+   自动更新，再进入下一轮。
+3. 随时点击**完成选片**。你可以把保留的原始照片复制到新目录，或生成 Lightroom /
+   Capture One 可读取的 XMP sidecar。程序绝不修改 RAW 字节、不覆盖已有文件，每次导出
+   都保存审计记录。
+
+六边形图解释清晰度、曝光、动态范围、对比、色彩和构图。Travel、Portrait、Landscape、
+Wildlife 和 Custom 是可切换的显式标准。“连拍选最佳”一次只显示一组相关照片，只需点出
+其中最好的一张。
+
+## 技术特点
+
+- 面向 RAW 工作流的增量、版本化 SQLite 特征缓存；
+- 每项客观标准都保存置信度、结构化证据、成本与分析器版本；
+- 使用拍摄时间、EXIF、感知哈希与本地描述符的连拍/近重复分组；
+- 每个 Profile 隔离的强正则 pairwise 个性化排序；
+- 同时考虑排序、模型不确定性与视觉多样性的动态 Top 5；
+- 可复现的本地留出评测、学习曲线和验收报告；
+- 有冲突保护、审计与撤销能力的 JSON/CSV/XMP/复制/链接工作流。
+
+详见[系统设计](DESIGN.md)、[路线图](ROADMAP.md)、[插件 SDK](docs/PLUGIN_SDK.md)、
+[隐私](docs/PRIVACY.md)、[性能](docs/PERFORMANCE.md)和[模型局限](docs/MODELS.md)。
+
+## 开发者运行
 
 需要 Python 3.10+：
 
 ```bash
 ./scripts/bootstrap.sh
+.venv/bin/raw-curator serve /path/to/photos --output reports/live
 ```
 
-macOS 开发应用可运行 `pip install -e '.[packaging]'` 后执行 `./scripts/build_macos.sh`，产物
-位于 `dist/RAWPhotoCurator.app`。双击后选择照片文件夹即可打开本地工作台；公开分发前仍需
-按 [发布文档](docs/RELEASE.md) 使用 Apple Developer ID 签名和公证。
-
-## 使用
+打开 `http://127.0.0.1:8765`。构建 macOS 应用或完整发布包：
 
 ```bash
-raw-curator analyze /path/to/photos --output reports/latest
+.venv/bin/pip install -e '.[packaging,vision]'
+./scripts/build_macos.sh
+./scripts/package_macos_release.sh v0.2.0
 ```
 
-完成后打开 `reports/latest/index.html`。分析使用最长边 1600px 的预览，不修改原文件。
+可选本地模型必须显式下载：`raw-curator install-model face` 和
+`raw-curator install-model aesthetic`。无法可靠测量的证据会显示为 unknown，不会被当成
+零分或自动淘汰。
 
-推荐使用本地交互式工作台。每次评价会立即写入本地 SQLite：
+## 评分、评测与 CLI
 
-```bash
-raw-curator serve /path/to/photos --output reports/live
-```
-
-然后访问 `http://127.0.0.1:8765`。服务只监听本机，不会上传照片。
-
-照片索引、客观特征和缩略图会写入输出目录的 `catalog.sqlite3`。未变化的照片再次扫描时
-直接命中缓存；文件内容、大小或修改时间变化后会自动重算。Alaska 测试集 355 张 ARW 的
-第二次扫描为 355/355 缓存命中。
-
-交互采用动态 Top 5：输入文件夹后完成全量初筛；“保留”的照片停留在候选池，“淘汰”
-的照片立即由下一张推荐补位。保留满 5 张后进入下一轮，已保留和已淘汰照片都会被排除，
-并使用累计反馈重新计算个人推荐分。
-
-顶部可以切换 Travel、Portrait、Landscape、Wildlife 和 Custom 选片标准。Profile 的显式
-权重会直接改变推荐先验；硬规则始终先于本地学习偏好执行。
-
-“连拍选最佳”使用拍摄时间、相机序列、感知哈希和本地视觉描述符识别近似重复与连拍。
-界面一次只显示一组；点击最想保留的一张后自动进入下一组，不要求用户理解聚类的合并、
-拆分等内部概念。底层分组纠正 API 仍保留给评测与高级工作流。
-
-可以复制 `docs/group-labels.example.json` 建立本地人工分组标注，并报告 pairwise
-precision、recall 和 F1：
+基础先验包含清晰度、曝光、高光/阴影保留、对比、噪声、色彩、白平衡、构图代理与
+独特性。它不是“普适审美定律”；有足够的保留/淘汰反馈后，个人模型才逐渐参与排序，且
+学习权重有上限。真实 RAW 高光余量、暗部恢复以及组内百分位作为独立证据保存。
 
 ```bash
-raw-curator evaluate-groups reports/live/catalog.sqlite3 my-group-labels.json
-```
-
-```bash
-raw-curator analyze /path/to/photos --output reports/latest --limit 50
-```
-
-## 当前评分
-
-- 清晰度 22%：灰度梯度强度
-- 构图代理 18%：边缘干扰惩罚与中心区域信息量
-- 曝光 12%：亮度均值与中间调偏差
-- 高光保留 8%、阴影保留 6%：接近剪裁的像素比例
-- 对比度 7%：5%–95% 亮度分位范围
-- 噪声代理 7%：低变化区域的局部残差
-- 色彩信息 5%：饱和度及色彩变化
-- 白平衡代理 5%：RGB 通道均值偏差
-- 独特性预留 10%：后续用于连拍/重复照片惩罚
-
-固定权重是可解释的初始先验，不是普适审美定律。每个 Profile 使用技术指标、冻结的
-48 维视觉描述符、EXIF、可选标准和组内百分位训练强正则 pairwise logistic ranker。
-至少有 2 张正例和 2 张负例才建立个人模型；随后按反馈量和模型一致率，将学习偏好逐步
-混入排序，最高 40%。模型、特征和反馈只写入本地 SQLite；可在“标准设置”中查看、导出、
-导入或重置当前 Profile 的模型。
-- 独特性：基于感知缩略图的近似重复惩罚
-
-这些分数用于初筛，不代表审美判断。连拍分组已经参与组内比较；主体、景深、人脸/表情与
-通用审美先验均通过独立插件接入，不会被基础代理指标冒充。
-
-每项客观标准同时保存置信度、结构化证据、分析器版本和组内百分位。RAW 高光余量与暗部
-恢复使用传感器线性抽样，仅对高排名候选按需计算；未计算或不可用时显示“未知”，不会按
-零分参与排序。
-
-“标准设置”显示每个分析器的运行成本、下载体积、安装状态与隐私边界。主体显著性、背景
-分离、景深和动作时机代理无需下载；可选模型使用
-`pip install -e '.[vision]'` 后，再以 `raw-curator install-model face` 或
-`raw-curator install-model aesthetic` 显式下载并校验。眼睛被遮挡、太小或证据不足时，
-眼睛对焦与闭眼返回 unknown，不会自动淘汰。新启用的插件独立补算自己的 Criterion，
-不会使已有基础分析缓存失效。模型来源、许可提示和局限见 `docs/MODELS.md`。
-
-## 下游工作流
-
-选片清单可以导出为 JSON 或 CSV；XMP 使用 Adobe 标准的 `xmp:Rating`、`xmp:Label` 与
-Camera Raw `crs:Pick`，只创建 sidecar，绝不修改 RAW。先生成计划、检查冲突，再执行并
-保留审计日志：
-
-```bash
+raw-curator acceptance reports/live --expected-photos 355
+raw-curator evaluate-personal reports/live --profile travel
+raw-curator evaluate-groups reports/live/catalog.sqlite3 group-labels.json
 raw-curator export reports/live/feedback.sqlite3 selection.json --profile travel
-raw-curator plan-xmp selection.json --output xmp-plan.json
-raw-curator apply-plan xmp-plan.json --audit xmp-audit.json
-
-raw-curator plan-files selection.json selected/ --method hardlink --output file-plan.json
-raw-curator apply-plan file-plan.json --audit file-audit.json
-raw-curator undo file-audit.json
 ```
 
-计划中已有目标文件会标记为 `conflict` 并跳过，不会覆盖。`copy`、`hardlink` 和 `symlink`
-使用相同的预览、审计与撤销流程。
+更完整的无损 XMP、复制、hardlink、symlink 与 `undo` 命令见
+`raw-curator --help` 和 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。
 
-## 本地验收
+## 隐私与安全
 
-实现完成与真实用户验收分开记录。下面的命令检查照片数量、缓存覆盖、失败任务、Criterion
-覆盖、真实反馈、人工分组纠正和个人模型；证据不足会明确输出 `missing`：
+本地服务只监听 `127.0.0.1`，无需云账号，也不上传照片。所有文件输出都先规划、检查冲突
+再执行；已有目标会跳过，并可通过审计文件撤销。
 
-```bash
-raw-curator acceptance reports/alaska-cache-validation --expected-photos 355
-```
+## License
 
-加入 `--group-labels grouping-labels.json` 后还会报告人工标注集上的分组 precision/recall。
-格式与验收边界见 `docs/ACCEPTANCE.md`。
-
-真实反馈的个人排序留出评测不依赖正在运行的服务器：
-
-```bash
-raw-curator evaluate-personal reports/alaska-cache-validation --profile travel
-```
-
-## 隐私
-
-所有处理默认在本机完成。生成的报告只包含缩略图和分析数据。
+见 [LICENSE](LICENSE)。
