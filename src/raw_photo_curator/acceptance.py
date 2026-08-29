@@ -30,6 +30,9 @@ def acceptance_report(
         failed_jobs = connection.execute(
             "SELECT count(*) FROM analysis_jobs WHERE status = 'failed'"
         ).fetchone()[0]
+        corrected_groups = connection.execute(
+            "SELECT count(*) FROM similarity_groups WHERE manually_corrected = 1"
+        ).fetchone()[0]
     coverage = cached / photos if photos else 0.0
 
     feedback = group_feedback = models = 0
@@ -53,8 +56,15 @@ def acceptance_report(
             feedback,
             "at least 5 real decisions; 20+ recommended for a learning curve",
         ),
+        "group_comparisons": _check(
+            group_feedback > 0,
+            group_feedback,
+            "at least one persisted group winner/reject decision",
+        ),
         "group_corrections": _check(
-            group_feedback > 0, group_feedback, "at least one persisted human correction"
+            corrected_groups > 0,
+            corrected_groups,
+            "at least one persisted split or merge correction",
         ),
         "preference_model": _check(models > 0, models, "at least one trained profile model"),
     }

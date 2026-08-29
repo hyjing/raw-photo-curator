@@ -20,6 +20,8 @@ def test_acceptance_separates_automated_evidence_from_missing_human_labels(tmp_p
     assert result["checks"]["photo_inventory"]["status"] == "pass"
     assert result["checks"]["warm_cache_coverage"]["status"] == "pass"
     assert result["checks"]["real_profile_feedback"]["status"] == "missing"
+    assert result["checks"]["group_comparisons"]["status"] == "missing"
+    assert result["checks"]["group_corrections"]["status"] == "missing"
     assert result["checks"]["labeled_group_evaluation"]["status"] == "missing"
     assert not result["ready"]
 
