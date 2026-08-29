@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from importlib.metadata import entry_points
 
 from .criteria import AnalyzerPlugin, Availability, RuntimeEnvironment
 from .objective import BuiltinObjectivePlugin
@@ -12,6 +13,8 @@ class PluginRegistry:
     _enabled: set[str] = field(default_factory=set)
 
     def register(self, plugin: AnalyzerPlugin, enabled: bool = True) -> None:
+        if not isinstance(plugin, AnalyzerPlugin):
+            raise TypeError("plugin does not implement AnalyzerPlugin")
         if plugin.id in self._plugins:
             raise ValueError(f"plugin already registered: {plugin.id}")
         self._plugins[plugin.id] = plugin
@@ -75,4 +78,10 @@ def default_registry(enabled: set[str] | None = None) -> PluginRegistry:
     registry = PluginRegistry()
     for plugin in (BuiltinObjectivePlugin(), *builtin_plugins()):
         registry.register(plugin, plugin.id in enabled)
+    for entry_point in entry_points(group="raw_photo_curator.analyzers"):
+        try:
+            plugin = entry_point.load()()
+            registry.register(plugin, plugin.id in enabled)
+        except (ImportError, TypeError, ValueError):
+            continue
     return registry

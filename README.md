@@ -1,5 +1,9 @@
 # RAW Photo Curator
 
+![RAW Photo Curator Alaska Top 5 演示](docs/assets/demo.gif)
+
+[English](README_EN.md) · 中文
+
 一个本地优先的 RAW/照片选片工具。它扫描文件夹，为每张照片分别计算：
 
 - **保留分**：清晰度、曝光、构图代理指标与独特性
@@ -15,10 +19,12 @@ LibRaw/rawpy）以及 JPEG、PNG、TIFF。
 需要 Python 3.10+：
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
+./scripts/bootstrap.sh
 ```
+
+macOS 开发应用可运行 `pip install -e '.[packaging]'` 后执行 `./scripts/build_macos.sh`，产物
+位于 `dist/RAWPhotoCurator.app`。双击后选择照片文件夹即可打开本地工作台；公开分发前仍需
+按 [发布文档](docs/RELEASE.md) 使用 Apple Developer ID 签名和公证。
 
 ## 使用
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "raw-photo-curator"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first RAW photo culling and editing-potential analyzer"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,7 +16,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.8"]
+dev = ["pytest>=8.0", "ruff>=0.8", "build>=1.2"]
+packaging = ["pyinstaller>=6.0"]
 
 [project.scripts]
 raw-curator = "raw_photo_curator.cli:main"
@@ -29,4 +30,3 @@ pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100
-

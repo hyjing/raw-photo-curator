@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 class CriterionKind(str, Enum):
@@ -70,6 +70,7 @@ class AnalysisContext:
     profile_id: str
 
 
+@runtime_checkable
 class AnalyzerPlugin(Protocol):
     id: str
     version: str
