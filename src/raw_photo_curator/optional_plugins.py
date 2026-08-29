@@ -1,4 +1,6 @@
 import importlib.util
+import os
+from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -130,73 +132,243 @@ class TimingDepthPlugin:
         ]
 
 
-class OptionalModelPlugin:
-    def __init__(
-        self,
-        plugin_id: str,
-        name: str,
-        description: str,
-        criteria: tuple[CriterionDefinition, ...],
-        package: str,
-        size_mb: float,
-        install_hint: str,
-    ):
-        self.id = plugin_id
-        self.version = "1.0.0"
-        self.criteria = criteria
-        self.package = package
-        self.manifest = PluginManifest(
-            name,
-            description,
-            size_mb,
-            CriterionCost.EXPENSIVE,
-            "模型和照片完全在本机运行，不联网",
-            install_hint,
-        )
-
-    def available(self, environment: RuntimeEnvironment) -> Availability:
-        installed = importlib.util.find_spec(self.package) is not None
-        return Availability(
-            False,
-            "model_not_configured" if installed else "not_installed",
-            "模型适配器尚未配置" if installed else "所需本地模型运行时未安装",
-        )
-
-    def analyze(self, photo: PhotoInput, context: AnalysisContext) -> list[CriterionResult]:
-        raise RuntimeError("optional model adapter is not installed")
-
-
-FACE_PLUGIN = OptionalModelPlugin(
-    "optional.face-eyes",
-    "人脸、眼睛与表情",
-    "检测人脸、眼睛对焦、闭眼和表情；缺少模型时所有结果保持 unknown。",
-    (
+class FaceEyesPlugin:
+    id = "optional.face-eyes"
+    version = "2.0.0"
+    manifest = PluginManifest(
+        "人脸、眼睛与表情",
+        "YuNet 检测人脸，OpenCV MobileFaceNet 识别表情；眼睛证据不足时返回 unknown。",
+        5.1,
+        CriterionCost.EXPENSIVE,
+        "模型随 OpenCV 安装并完全在本机运行，不联网",
+        "运行 raw-curator install-model face",
+    )
+    criteria = (
         CriterionDefinition("face.eye_focus", "眼睛对焦", CriterionKind.SOFT_WEIGHT, cost=CriterionCost.EXPENSIVE),
         CriterionDefinition("face.blink", "闭眼", CriterionKind.HARD_RULE, "boolean", CriterionCost.EXPENSIVE),
         CriterionDefinition("face.expression", "表情", CriterionKind.SOFT_WEIGHT, cost=CriterionCost.EXPENSIVE),
-    ),
-    "mediapipe",
-    32,
-    "安装可选依赖 raw-photo-curator[vision]",
-)
+    )
 
-AESTHETIC_PLUGIN = OptionalModelPlugin(
-    "optional.aesthetic-embedding",
-    "通用审美 Embedding",
-    "冻结的轻量审美向量，仅作为低优先级先验，不覆盖用户规则。",
-    (
+    def __init__(
+        self,
+        model_path: Path | None = None,
+        expression_model: Path | None = None,
+    ):
+        self.model_path = model_path or face_model_path()
+        self.expression_model = expression_model or expression_model_path()
+        self._face_detector = None
+        self._expression_net = None
+        self._cascades = None
+
+    def available(self, environment: RuntimeEnvironment) -> Availability:
+        installed = importlib.util.find_spec("cv2") is not None
+        ready = installed and self.model_path.is_file() and self.expression_model.is_file()
+        reason = "" if ready else (
+            "需要安装 raw-photo-curator[vision]" if not installed
+            else f"未找到人脸模型包：{self.model_path.parent}"
+        )
+        return Availability(ready, "ready" if ready else "model_not_configured", reason)
+
+    def analyze(self, photo: PhotoInput, context: AnalysisContext) -> list[CriterionResult]:
+        with Image.open(photo.path) as image:
+            return self.analyze_image(image.convert("RGB"))
+
+    def analyze_image(self, image: Image.Image) -> list[CriterionResult]:
+        import cv2
+
+        rgb = np.asarray(image.resize((960, 640), Image.Resampling.LANCZOS))
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        gray = cv2.equalizeHist(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY))
+        if self._face_detector is None:
+            self._face_detector = cv2.FaceDetectorYN.create(
+                str(self.model_path), "", (960, 640), 0.9, 0.3, 5000
+            )
+        self._face_detector.setInputSize((960, 640))
+        _, detected = self._face_detector.detect(bgr)
+        faces = [] if detected is None else detected
+        if self._cascades is None:
+            root = Path(cv2.data.haarcascades)
+            self._cascades = cv2.CascadeClassifier(
+                str(root / "haarcascade_eye_tree_eyeglasses.xml")
+            )
+        eye_detector = self._cascades
+        eye_scores: list[float] = []
+        eye_count = 0
+        boxes = []
+        confidences = []
+        expression_probabilities: list[np.ndarray] = []
+        for face in faces:
+            x, y, width, height = (int(value) for value in face[:4])
+            confidences.append(round(float(face[14]), 4))
+            roi = gray[y : y + height, x : x + width]
+            eyes = eye_detector.detectMultiScale(
+                roi[: int(height * 0.65)], 1.1, 5, minSize=(12, 12)
+            )
+            eye_count += min(2, len(eyes))
+            boxes.append([int(x), int(y), int(width), int(height)])
+            for ex, ey, ew, eh in eyes[:2]:
+                variance = float(cv2.Laplacian(roi[ey : ey + eh, ex : ex + ew], cv2.CV_64F).var())
+                eye_scores.append(min(1.0, variance / 350.0))
+            expression_probabilities.append(self._expression_distribution(bgr, face))
+        labels = ("angry", "disgust", "fearful", "happy", "neutral", "sad", "surprised")
+        expression_mean = (
+            np.mean(expression_probabilities, axis=0)
+            if expression_probabilities else np.zeros(7, dtype=np.float32)
+        )
+        expression_index = int(np.argmax(expression_mean))
+        expression_confidence = float(expression_mean[expression_index])
+        evidence = {
+            "method": "yunet_plus_mobilefacenet_fer",
+            "faces": len(faces),
+            "eyes": eye_count,
+            "face_boxes_preview": boxes,
+            "face_confidence": confidences,
+            "expression": labels[expression_index] if len(faces) else "unknown",
+            "expression_probabilities": {
+                label: round(float(value), 4)
+                for label, value in zip(labels, expression_mean, strict=True)
+            },
+            "warning": "blink_unknown_without_eyelid_landmarks",
+        }
+        if not len(faces):
+            return [
+                CriterionResult(criterion.id, "unknown", None, 0.0, evidence, self.version)
+                for criterion in self.criteria
+            ]
+        focus = float(np.mean(eye_scores)) if eye_scores else None
+        # The Haar eye detector can establish visible/open eyes, but absence is not
+        # evidence of a blink (small faces, glasses and occlusion all cause misses).
+        blink_visible = eye_count >= len(faces) * 2
+        expression = float(expression_mean[3] + 0.5 * expression_mean[6])
+        return [
+            CriterionResult(
+                "face.eye_focus", round(focus * 100, 1) if focus is not None else "unknown",
+                focus, 0.62 if eye_scores else 0.0, evidence, self.version,
+            ),
+            CriterionResult(
+                "face.blink", False if blink_visible else "unknown",
+                1.0 if blink_visible else None, 0.55 if blink_visible else 0.0,
+                evidence, self.version,
+            ),
+            CriterionResult(
+                "face.expression", labels[expression_index], expression,
+                expression_confidence, evidence, self.version,
+            ),
+        ]
+
+    def _expression_distribution(self, bgr: np.ndarray, face: np.ndarray) -> np.ndarray:
+        import cv2
+
+        if self._expression_net is None:
+            self._expression_net = cv2.dnn.readNet(str(self.expression_model))
+        source = np.asarray(face[4:14], dtype=np.float32).reshape(5, 2)
+        target = np.asarray(
+            [[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
+             [41.5493, 92.3655], [70.7299, 92.2041]],
+            dtype=np.float32,
+        )
+        transform, _ = cv2.estimateAffinePartial2D(source, target, method=cv2.LMEDS)
+        aligned = cv2.warpAffine(bgr, transform, (112, 112))
+        rgb = cv2.cvtColor(aligned, cv2.COLOR_BGR2RGB).astype(np.float32) / 127.5 - 1.0
+        blob = cv2.dnn.blobFromImage(rgb)
+        self._expression_net.setInput(blob, "data")
+        logits = np.asarray(self._expression_net.forward("label"), dtype=np.float32).reshape(-1)
+        logits -= float(logits.max())
+        probabilities = np.exp(logits)
+        return probabilities / max(1e-8, float(probabilities.sum()))
+
+
+def face_model_path() -> Path:
+    configured = os.environ.get("RAW_CURATOR_FACE_MODEL")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".cache/raw-photo-curator/models/face_detection_yunet_2023mar.onnx"
+
+
+def expression_model_path() -> Path:
+    configured = os.environ.get("RAW_CURATOR_EXPRESSION_MODEL")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".cache/raw-photo-curator/models/facial_expression_recognition_mobilefacenet_2022july.onnx"
+
+
+def nima_model_path() -> Path:
+    configured = os.environ.get("RAW_CURATOR_NIMA_MODEL")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".cache/raw-photo-curator/models/nima_mobilenet_aesthetic.onnx"
+
+
+class NimaAestheticPlugin:
+    id = "optional.aesthetic-embedding"
+    version = "2.0.0"
+    manifest = PluginManifest(
+        "通用审美 Embedding",
+        "冻结 NIMA MobileNet 输出 AVA 1–10 评分分布，仅作低优先级先验。",
+        12.9,
+        CriterionCost.EXPENSIVE,
+        "权重和照片完全在本机运行，不联网",
+        "运行 raw-curator install-model aesthetic",
+    )
+    criteria = (
         CriterionDefinition(
             "aesthetic.embedding_score",
             "审美先验",
             CriterionKind.LEARNED_FEATURE,
             cost=CriterionCost.EXPENSIVE,
         ),
-    ),
-    "onnxruntime",
-    24,
-    "安装可选依赖 raw-photo-curator[vision] 并下载模型文件",
-)
+    )
+
+    def __init__(self, model_path: Path | None = None):
+        self.model_path = model_path or nima_model_path()
+        self._session = None
+
+    def available(self, environment: RuntimeEnvironment) -> Availability:
+        runtime = importlib.util.find_spec("onnxruntime") is not None
+        ready = runtime and self.model_path.is_file()
+        reason = "" if ready else (
+            "需要安装 raw-photo-curator[vision]" if not runtime
+            else f"未找到模型：{self.model_path}"
+        )
+        return Availability(ready, "ready" if ready else "model_not_configured", reason)
+
+    def analyze(self, photo: PhotoInput, context: AnalysisContext) -> list[CriterionResult]:
+        with Image.open(photo.path) as image:
+            return self.analyze_image(image.convert("RGB"))
+
+    def analyze_image(self, image: Image.Image) -> list[CriterionResult]:
+        if self._session is None:
+            import onnxruntime
+
+            self._session = onnxruntime.InferenceSession(
+                str(self.model_path), providers=["CPUExecutionProvider"]
+            )
+        array = np.asarray(
+            image.resize((224, 224), Image.Resampling.LANCZOS), dtype=np.float32
+        )[None, ...]
+        array = array / 127.5 - 1.0
+        distribution = np.asarray(
+            self._session.run(None, {self._session.get_inputs()[0].name: array})[0]
+        ).reshape(-1)
+        distribution = np.maximum(distribution, 0)
+        distribution /= max(1e-8, float(distribution.sum()))
+        mean = float(distribution @ np.arange(1, 11, dtype=np.float32))
+        standard_deviation = float(
+            np.sqrt(distribution @ ((np.arange(1, 11) - mean) ** 2))
+        )
+        normalized = max(0.0, min(1.0, (mean - 1) / 9))
+        confidence = max(0.35, min(0.85, 1 - standard_deviation / 4.5))
+        return [CriterionResult(
+            "aesthetic.embedding_score", round(mean, 3), normalized, confidence,
+            {
+                "method": "nima_mobilenet_ava_onnx",
+                "distribution": [round(float(value), 5) for value in distribution],
+                "standard_deviation": round(standard_deviation, 3),
+                "warning": "generic_prior_not_personal_taste",
+            },
+            self.version,
+        )]
 
 
 def builtin_plugins() -> tuple[object, ...]:
-    return SaliencyPlugin(), TimingDepthPlugin(), FACE_PLUGIN, AESTHETIC_PLUGIN
+    return SaliencyPlugin(), TimingDepthPlugin(), FaceEyesPlugin(), NimaAestheticPlugin()

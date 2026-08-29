@@ -9,16 +9,19 @@ import numpy as np
 
 from .models import Result
 
-SCHEMA_VERSION = "preference-v1"
+SCHEMA_VERSION = "preference-v2"
 METRIC_NAMES = (
     "sharpness", "exposure", "highlights", "shadows", "contrast", "noise",
     "color", "white_balance", "composition", "horizon", "edge_integrity",
 )
 CRITERION_IDS = (
     "subject.saliency_concentration", "subject.background_separation",
-    "depth.separation", "timing.motion_clarity",
+    "depth.separation", "timing.motion_clarity", "aesthetic.embedding_score",
 )
-CRITERION_NAMES = ("subject_saliency", "background_separation", "depth_separation", "motion_clarity")
+CRITERION_NAMES = (
+    "subject_saliency", "background_separation", "depth_separation", "motion_clarity",
+    "aesthetic_prior",
+)
 EXIF_NAMES = ("focal_length", "aperture", "shutter_speed", "iso")
 EMBEDDING_SIZE = 48
 FEATURE_NAMES = (

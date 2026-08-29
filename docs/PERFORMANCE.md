@@ -8,6 +8,9 @@ Measured on the local Alaska set (355 Sony ARW files):
 - pairwise model training with 20 simulated labels: about 10 ms;
 - prediction over all cached records: about 8 ms;
 - serialized profile model: about 1 KB.
+- optional NIMA pass over 355 cached JPEG previews: 4.69 seconds;
+- optional YuNet + expression pass over the same previews: 8.07 seconds, with two real
+  people-containing images detected and occluded eyes safely reported as unknown.
 
 These are development-machine measurements, not universal guarantees. First-time optional plugin
 backfill can take several minutes; subsequent runs reuse plugin-specific cache entries. Run the

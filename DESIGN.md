@@ -240,7 +240,7 @@ explicit_score = weighted_mean(enabled criterion scores with sufficient confiden
 
 当前实现：
 
-1. 固定 71 维 feature schema：11 项技术指标、4 项可选标准、4 项组内百分位、4 项
+1. 固定 73 维 feature schema：11 项技术指标、5 项可选标准、5 项组内百分位、4 项
    归一化 EXIF 和 48 维冻结描述符
 2. 正负反馈组合为 pairwise difference，使用 L2 正则的线性 logistic ranker
 3. 每次反馈后在 CPU 重训，最多采样 512 对；不足 2 个正例和 2 个负例时不建立模型

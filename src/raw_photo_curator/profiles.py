@@ -45,6 +45,7 @@ BASE = {
     "subject.background_separation": 0.03,
     "depth.separation": 0.04,
     "timing.motion_clarity": 0.04,
+    "aesthetic.embedding_score": 0.03,
 }
 
 BUILTIN_PROFILES = (
@@ -58,8 +59,10 @@ BUILTIN_PROFILES = (
             "composition": 0.21,
             "color": 0.08,
             "contrast": 0.04,
+            "face.eye_focus": 0.12,
+            "face.expression": 0.08,
         },
-        {},
+        {"face.blink": {"action": "reject", "threshold": 30.0}},
     ),
     Profile(
         "landscape",
@@ -96,9 +99,16 @@ def weighted_score(
     return round(sum(all_values[key] * weight for key, weight in usable.items()) / total, 1)
 
 
-def hard_rule_reasons(result: Result, profile: Profile) -> tuple[str, ...]:
+def hard_rule_reasons(
+    result: Result, profile: Profile, criteria: list[dict[str, object]] | None = None
+) -> tuple[str, ...]:
     reasons = []
-    values = result.metrics.__dict__
+    criterion_values = {
+        str(item["id"]): float(item["score"]) * 100
+        for item in criteria or []
+        if item.get("score") is not None and float(item.get("confidence", 0)) >= 0.5
+    }
+    values = {**result.metrics.__dict__, **criterion_values}
     for criterion, rule in profile.hard_rules.items():
         threshold = float(rule.get("threshold", 0))
         if rule.get("action") == "reject" and criterion in values and values[criterion] < threshold:

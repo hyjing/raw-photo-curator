@@ -24,7 +24,7 @@ adds at most 40% learned preference when enough local evidence exists.
 - incremental, versioned SQLite feature cache for RAW workflows;
 - time/EXIF/hash/embedding similarity groups with persisted corrections;
 - criterion/plugin protocol with confidence, evidence, cost, and graceful degradation;
-- 71-D strongly regularized pairwise learner, isolated per Profile;
+- 73-D strongly regularized pairwise learner, isolated per Profile;
 - active selection balancing score, uncertainty, and visual diversity;
 - reproducible local holdout metrics and learning curves;
 - audited, reversible JSON/CSV/XMP/copy/link export workflow.
@@ -32,3 +32,8 @@ adds at most 40% learned preference when enough local evidence exists.
 See [System Design](DESIGN.md), [Roadmap](ROADMAP.md), [Plugin SDK](docs/PLUGIN_SDK.md),
 [Privacy](docs/PRIVACY.md), [Performance](docs/PERFORMANCE.md), and
 [Models & limitations](docs/MODELS.md).
+
+Optional local inference is explicit: install `.[vision]`, then run
+`raw-curator install-model face` and/or `raw-curator install-model aesthetic`. Downloads are pinned
+and checksum-verified. Face/eye/expression and NIMA results retain confidence and evidence; an
+occluded or undetected eye stays unknown instead of being mislabeled as a blink.

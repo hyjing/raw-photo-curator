@@ -310,10 +310,12 @@ def _refresh_candidates(state: SessionState, database: Path) -> None:
         active_unreviewed = []
         state.round_number += 1
     excluded = set(feedback) | current
-    available = [
-        result for result in state.results
-        if str(result.path) not in excluded and not hard_rule_reasons(result, profile)
-    ]
+    available = []
+    for result in state.results:
+        path = str(result.path)
+        criteria = list(contexts.get(path, {}).get("criteria", {}).values())
+        if path not in excluded and not hard_rule_reasons(result, profile, criteria):
+            available.append(result)
     retained = kept_current + active_unreviewed
     needed = 5 - len(retained)
     selected = select_active_candidates(
