@@ -6,14 +6,13 @@
 | --- | --- | --- |
 | ![Large Top 5 and explainable scores](docs/assets/top5.png) | ![Pick the best frame in a burst](docs/assets/burst-review.png) | ![Copy keeps or generate XMP](docs/assets/finish.png) |
 
-[中文](README.md) · English
+[Read the bilingual README rendered on the repository front page](README.md#english)
 
 Local-first, explainable photo culling for Sony ARW and common image formats. Choose a folder in
 Finder, get five recommendations, keep or reject, and let a lightweight on-device ranker learn your
 preferences. Photos, previews, scores, and feedback stay on your Mac.
 
-> Private alpha. The first downloadable macOS build is produced by the release workflow; no Python
-> setup is required for release users.
+> Public alpha. The downloadable macOS app does not require Python.
 
 ## Download for macOS
 
