@@ -22,3 +22,10 @@ def test_main_workflow_has_native_folder_and_finish_actions():
     assert "/api/completion" in APP_HTML
     assert "/api/finalize" in APP_HTML
     assert "复制会保留原始 RAW 不变" in APP_HTML
+
+
+def test_empty_library_renders_a_welcome_screen_before_finder():
+    assert "从一整个文件夹，找到值得留下的照片" in APP_HTML
+    assert "选择照片文件夹" in APP_HTML
+    assert "完全本地处理" in APP_HTML
+    assert "d.candidates.length?render(d.candidates):renderWelcome()" in APP_HTML

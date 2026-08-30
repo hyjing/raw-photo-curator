@@ -31,7 +31,7 @@ CHOICES = {"keep", "edit", "reject", "maybe", None}
 class SessionState:
     results: list[Result]
     output: Path
-    folder: Path
+    folder: Path | None
     limit: int
     analyzer: object
     progress_current: int = 0
@@ -441,7 +441,7 @@ def make_handler(state: SessionState, database: Path):
                 self._json({
                     "photos": _photo_payload(state.results, database),
                     "summary": _summary(database, state.results),
-                    "folder": str(state.folder),
+                    "folder": str(state.folder) if state.folder else "",
                 })
             elif route == "/api/progress":
                 self._json({
@@ -458,7 +458,7 @@ def make_handler(state: SessionState, database: Path):
             elif route == "/api/candidates":
                 self._json({
                     "candidates": _candidate_payload(state, database),
-                    "folder": str(state.folder),
+                    "folder": str(state.folder) if state.folder else "",
                     "round": state.round_number,
                     "summary": _summary(database, state.results),
                     "active_profile": _active_profile(database).id,
@@ -779,6 +779,9 @@ def make_handler(state: SessionState, database: Path):
                 self._json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
         def _load_more(self) -> None:
+            if state.folder is None:
+                self._json({"ok": False, "error": "请先选择照片文件夹"}, HTTPStatus.BAD_REQUEST)
+                return
             new_results = state.analyzer(
                 state.folder, state.output, state.limit, len(state.results)
             )
@@ -791,7 +794,7 @@ def make_handler(state: SessionState, database: Path):
             try:
                 size = int(self.headers.get("Content-Length", "0"))
                 data = json.loads(self.rfile.read(min(size, 16_384))) if size else {}
-                requested = Path(str(data.get("folder", state.folder))).expanduser().resolve()
+                requested = Path(str(data.get("folder") or state.folder or "")).expanduser().resolve()
                 if not requested.is_dir():
                     self._json({"ok": False, "error": "文件夹不存在"}, HTTPStatus.BAD_REQUEST)
                     return
@@ -1044,11 +1047,18 @@ def make_handler(state: SessionState, database: Path):
     return Handler
 
 
-def serve(results: list[Result], output: Path, port: int, folder: Path, limit: int, analyzer: object) -> None:
+def serve(
+    results: list[Result],
+    output: Path,
+    port: int,
+    folder: Path | None,
+    limit: int,
+    analyzer: object,
+) -> None:
     output.mkdir(parents=True, exist_ok=True)
     database = output / "feedback.sqlite3"
     _connect(database).close()
-    state = SessionState(results, output, folder.resolve(), limit, analyzer)
+    state = SessionState(results, output, folder.resolve() if folder else None, limit, analyzer)
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(state, database))
     print(f"\n本地选片工作台：http://127.0.0.1:{port}")
     print(f"反馈数据库：{database.resolve()}")
@@ -1120,7 +1130,8 @@ APP_HTML = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 header{position:sticky;top:0;z-index:5;padding:18px 4vw 16px;border-bottom:1px solid #ffffff0f;background:#090b10de;backdrop-filter:blur(20px)}.topline{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.brand{display:flex;align-items:center;gap:11px}.mark{display:grid;place-items:center;width:34px;height:34px;border-radius:11px;background:linear-gradient(145deg,#83f7b4,#58bfff);color:#07100b;font-weight:900}.brand h1{font-size:17px;letter-spacing:-.02em;margin:0}.brand small{display:block;color:var(--muted);font-size:11px;margin-top:2px}.meta{display:flex;gap:8px}.chip{padding:6px 10px;border:1px solid var(--line);border-radius:999px;color:#b9bec8;background:#ffffff05;font-size:12px}
 .controls{display:grid;grid-template-columns:minmax(260px,1fr) auto auto auto;gap:10px}.pathbox{display:flex;align-items:center;gap:9px;padding:0 13px;border:1px solid var(--line);border-radius:12px;background:#0d1016;transition:.2s}.pathbox:focus-within{border-color:#65d998;box-shadow:0 0 0 3px #65d99814}.pathbox span{color:#697181}input{width:100%;border:0;outline:0;background:transparent;color:var(--text);padding:12px 0}select,button{border:1px solid var(--line);background:#20252f;color:var(--text);border-radius:11px;padding:10px 14px;cursor:pointer;transition:.18s}button:hover{border-color:#4c5565;transform:translateY(-1px)}button:disabled{opacity:.5;cursor:default;transform:none}#chooseFolder{background:#1c372b;border-color:#3a7655;color:#caffe0;font-weight:700}#start{background:var(--text);color:#0b0d11;border:0;font-weight:750;padding-inline:20px}.activity{display:flex;align-items:center;gap:12px;min-height:20px;margin-top:10px}progress{width:180px;height:5px;border:0;accent-color:var(--accent)}#status{color:var(--muted);font-size:12px}
 main{max-width:1540px;margin:auto;padding:28px 4vw 60px}.grid{display:grid;grid-template-columns:1fr;gap:26px}.card{position:relative;display:grid;grid-template-columns:minmax(0,1.8fr) minmax(350px,.82fr);background:linear-gradient(145deg,#171b23,#11141a);border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:0 18px 60px #0005}.card.kept{border-color:#56d88d;box-shadow:0 18px 60px #0005,0 0 0 1px #56d88d55}.rank{position:absolute;z-index:2;top:14px;left:14px;padding:7px 10px;border:1px solid #ffffff26;border-radius:10px;background:#07090ba8;backdrop-filter:blur(12px);font-weight:800}.photo-wrap{position:relative;display:grid;place-items:center;min-height:470px;background:linear-gradient(145deg,#08090c,#0e1116)}.card img{display:block;width:100%;height:100%;max-height:72vh;object-fit:contain}.body{display:flex;flex-direction:column;padding:23px}.eyebrow{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.title-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:5px}.name{font-size:18px;font-weight:750;overflow-wrap:anywhere}.rotate{position:absolute;z-index:2;top:14px;right:14px;padding:9px 13px;white-space:nowrap;background:#07090bc7;border-color:#ffffff2b;backdrop-filter:blur(12px);box-shadow:0 5px 18px #0006}.rotate:hover{background:#20252ee8}.score{display:flex;gap:9px;margin:16px 0 12px}.score span{display:flex;flex-direction:column;gap:2px;flex:1;padding:10px 12px;border:1px solid var(--line);border-radius:12px;color:var(--muted);font-size:11px;background:#0b0e13}.score strong{font-size:22px;color:var(--text);line-height:1.1}.reason{min-height:44px;color:#c8ccd4;line-height:1.55}.evidence{display:flex;gap:5px;flex-wrap:wrap}.evidence span{padding:4px 7px;border-radius:7px;background:#ffffff08;color:#aeb5c0;font-size:10px}.evidence .unknown{color:#ffcf87}.radar{display:block;width:100%;max-width:280px;margin:auto}.radar .gridline{fill:none;stroke:#343a46;stroke-width:1}.radar .axis{stroke:#2b303a}.radar .shape{fill:#72eca535;stroke:#72eca5;stroke-width:2}.radar text{fill:#aeb4bf;font:11px system-ui}.actions{display:grid;grid-template-columns:1.25fr 1fr;gap:9px;margin-top:auto;padding-top:14px}.actions button{font-weight:700}.keep{background:#22633e;border-color:#388d5b}.keep:hover{background:#2b784b}.reject{background:#302328;border-color:#5a343d;color:#ffc4c4}.reject:hover{background:#48282f}.badge{color:var(--accent);font-size:12px;margin-top:9px}
-@media(max-width:900px){header{position:relative}.card{grid-template-columns:1fr}.photo-wrap{min-height:0}.card img{max-height:none;aspect-ratio:3/2}.radar{max-width:250px}}@media(max-width:640px){.controls{grid-template-columns:1fr}.topline{align-items:flex-start}.meta{flex-direction:column}.card{border-radius:15px}.body{padding:18px}}
+.welcome{display:grid;min-height:calc(100vh - 190px);place-items:center}.welcome-card{width:min(760px,94vw);padding:46px;border:1px solid #2c3833;border-radius:28px;background:radial-gradient(circle at 75% 10%,#233a3266,transparent 38%),linear-gradient(145deg,#171c22,#0e1116);box-shadow:0 30px 90px #0007;text-align:center}.welcome-mark{display:grid;place-items:center;width:72px;height:72px;margin:0 auto 22px;border-radius:22px;background:linear-gradient(145deg,#83f7b4,#58bfff);color:#07100b;font-size:32px;font-weight:900}.welcome h2{margin:0;font-size:34px;letter-spacing:-.04em}.welcome p{max-width:580px;margin:15px auto 25px;color:#aeb5c0;line-height:1.7}.welcome button{padding:14px 22px;background:#dfffea;color:#0b1710;border:0;font-weight:800}.welcome-points{display:flex;justify-content:center;gap:18px;flex-wrap:wrap;margin-top:24px;color:#78818f;font-size:12px}.welcome-points span{padding:7px 10px;border:1px solid var(--line);border-radius:999px;background:#090c10}
+@media(max-width:900px){header{position:relative}.card{grid-template-columns:1fr}.photo-wrap{min-height:0}.card img{max-height:none;aspect-ratio:3/2}.radar{max-width:250px}}@media(max-width:640px){.controls{grid-template-columns:1fr}.topline{align-items:flex-start}.meta{flex-direction:column}.card{border-radius:15px}.body{padding:18px}.welcome-card{padding:30px 20px}.welcome h2{font-size:27px}}
 .group-panel{position:fixed;inset:0;z-index:20;display:none;background:#07090bf2;backdrop-filter:blur(16px);overflow:auto;padding:24px 4vw 60px}.group-panel.open{display:block}.group-toolbar{position:sticky;top:0;z-index:3;display:flex;align-items:center;gap:12px;padding:12px 0 18px;background:#07090bf2}.group-toolbar h2{margin:0}.group-progress{margin-right:auto;color:var(--muted);font-size:12px}.group-list{max-width:1400px;margin:auto}.similarity-group{padding:20px;border:1px solid var(--line);border-radius:18px;background:var(--surface)}.group-head{display:flex;gap:10px;align-items:center;margin-bottom:16px}.group-head strong{margin-right:auto}.member-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}.member-card{position:relative}.member-choice{position:relative;display:block;width:100%;overflow:hidden;padding:0;border:1px solid var(--line);border-radius:14px;background:#050608;aspect-ratio:3/2}.member-choice:hover{border-color:var(--accent);transform:translateY(-2px)}.member-choice img{width:100%;height:100%;object-fit:contain}.member-choice span{position:absolute;left:10px;right:10px;bottom:10px;padding:8px 10px;border-radius:9px;background:#050608dc;color:var(--text);text-align:left}.group-rotate{position:absolute;z-index:2;top:9px;right:9px;padding:7px 10px;background:#050608d9;border-color:#ffffff35;box-shadow:0 4px 15px #0007}.group-done{display:grid;place-items:center;min-height:50vh;color:var(--muted);font-size:18px}
 .settings-panel{position:fixed;inset:0;z-index:30;display:none;place-items:center;background:#05070acc;backdrop-filter:blur(14px);padding:20px}.settings-panel.open{display:grid}.settings-card{width:min(760px,96vw);max-height:88vh;overflow:auto;padding:22px;border:1px solid var(--line);border-radius:20px;background:#12161d}.settings-head{display:flex;align-items:center}.settings-head h2{margin:0 auto 5px 0}.plugin-list{display:grid;gap:10px;margin-top:15px}.plugin-card{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:start;padding:14px;border:1px solid var(--line);border-radius:13px;background:#0b0e13}.plugin-card input{width:auto}.plugin-card strong{display:block}.plugin-card p{margin:5px 0;color:var(--muted);font-size:12px;line-height:1.45}.plugin-meta{display:flex;gap:6px;flex-wrap:wrap}.plugin-meta span{padding:3px 6px;border-radius:6px;background:#ffffff08;color:#abb1bc;font-size:10px}.unavailable{color:#ffba82;font-size:11px}
 .custom-editor,.model-editor{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}.custom-editor h3,.model-editor h3{margin:0 0 10px}.weight-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:7px}.weight-row{display:grid;grid-template-columns:1fr 80px;gap:8px;align-items:center;color:#bcc2cc;font-size:12px}.weight-row input{padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#090c11}.custom-editor button,.model-editor button{margin-top:12px}.model-status{color:var(--muted);line-height:1.6;font-size:12px}.model-actions{display:flex;gap:8px;flex-wrap:wrap}.model-actions input{display:none}
@@ -1132,7 +1143,8 @@ const folder=document.getElementById('folder'),profile=document.getElementById('
 const groupPanel=document.getElementById('groupPanel'),groupList=document.getElementById('groupList'),groupProgress=document.getElementById('groupProgress');let groupsData=[],groupIndex=0;
 const settingsPanel=document.getElementById('settingsPanel'),pluginList=document.getElementById('pluginList');
 const escapeHTML=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-async function loadCandidates(){const d=await(await fetch('/api/candidates')).json();folder.value=d.folder;roundEl.textContent=`第 ${d.round} 轮`;summaryEl.textContent=`累计保留 ${d.summary.keep} · 淘汰 ${d.summary.reject}`;render(d.candidates)}
+function renderWelcome(){grid.innerHTML='<section class="welcome"><div class="welcome-card"><div class="welcome-mark">R</div><h2>从一整个文件夹，找到值得留下的照片</h2><p>选择 ARW、JPEG、PNG 或 TIFF 文件夹。程序会在本机分析画质与构图，并随着你的保留和淘汰逐步学习偏好。</p><button id="welcomeChoose">选择照片文件夹</button><div class="welcome-points"><span>完全本地处理</span><span>不修改原始 RAW</span><span>结果可导出到 Lightroom</span></div></div></section>';document.getElementById('welcomeChoose').onclick=()=>chooseFolder.click()}
+async function loadCandidates(){const d=await(await fetch('/api/candidates')).json();folder.value=d.folder;start.disabled=!d.folder;roundEl.textContent=`第 ${d.round} 轮`;summaryEl.textContent=d.candidates.length?`累计保留 ${d.summary.keep} · 淘汰 ${d.summary.reject}`:'准备开始';d.candidates.length?render(d.candidates):renderWelcome()}
 async function loadProfiles(){const d=await(await fetch('/api/profiles')).json();profile.innerHTML=d.profiles.map(p=>`<option value="${p.id}">${escapeHTML(p.name)}</option>`).join('');profile.value=d.active_profile}
 const axes=[['清晰',m=>m.sharpness],['曝光',m=>m.exposure],['动态范围',m=>(m.highlights+m.shadows)/2],['对比',m=>m.contrast],['色彩',m=>(m.color+m.white_balance)/2],['构图',m=>m.composition]];
 function polygon(values,radius){return values.map((value,i)=>{const angle=-Math.PI/2+i*Math.PI/3,r=radius*value/100;return `${110+Math.cos(angle)*r},${100+Math.sin(angle)*r}`}).join(' ')}
@@ -1145,7 +1157,7 @@ grid.onclick=async e=>{const pathValue=e.target.dataset.path;if(!pathValue)retur
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function followJob(){while(true){const p=await(await fetch('/api/progress')).json();if(p.total)bar.value=p.current/p.total*100;if(p.stage==='ranking')statusEl.textContent='正在根据反馈生成 Top 5…';else if(p.running)statusEl.textContent=`正在分析 ${p.current} / ${p.total}（${p.total?Math.round(p.current/p.total*100):0}%）`;if(!p.running){if(p.stage==='done'){await loadCandidates();statusEl.textContent=`已分析 ${p.total} 张 · 缓存 ${p.cache_hits} · 新分析 ${p.cache_misses}${p.failed?` · 跳过 ${p.failed}`:''}`}else if(p.stage==='cancelled')statusEl.textContent='已取消；下次会从缓存进度继续';else statusEl.textContent=p.error||'分析失败';break}await wait(350)}}
 start.onclick=async()=>{start.disabled=true;cancel.disabled=false;cancel.hidden=false;bar.hidden=false;bar.value=0;statusEl.textContent='正在建立本地照片索引…';try{const d=await(await fetch('/api/recommendations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:folder.value})})).json();if(d.ok)await followJob();else statusEl.textContent=d.error||'分析失败'}finally{bar.value=100;setTimeout(()=>bar.hidden=true,1000);cancel.hidden=true;start.disabled=false}};
-chooseFolder.onclick=async()=>{chooseFolder.disabled=true;statusEl.textContent='正在打开 Finder…';try{const d=await(await fetch('/api/folder-picker',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({purpose:'photos'})})).json();if(d.ok){folder.value=d.folder;statusEl.textContent='已选择照片文件夹，开始本地分析…';start.click()}else if(!d.cancelled)statusEl.textContent=d.error||'无法打开文件夹选择器';else statusEl.textContent='已取消选择'}finally{chooseFolder.disabled=false}};
+chooseFolder.onclick=async()=>{chooseFolder.disabled=true;statusEl.textContent='正在打开 Finder…';try{const d=await(await fetch('/api/folder-picker',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({purpose:'photos'})})).json();if(d.ok){folder.value=d.folder;start.disabled=false;statusEl.textContent='已选择照片文件夹，开始本地分析…';start.click()}else if(!d.cancelled)statusEl.textContent=d.error||'无法打开文件夹选择器';else statusEl.textContent='已取消选择'}finally{chooseFolder.disabled=false}};
 cancel.onclick=async()=>{cancel.disabled=true;await fetch('/api/cancel',{method:'POST'});statusEl.textContent='正在安全停止…'};
 profile.onchange=async()=>{profile.disabled=true;const d=await(await fetch('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile_id:profile.value})})).json();if(d.ok){render(d.candidates);statusEl.textContent=`已切换到 ${profile.options[profile.selectedIndex].text} 标准并重新排序`}profile.disabled=false};
 function renderGroup(){if(groupIndex>=groupsData.length){groupProgress.textContent=`已完成 ${groupsData.length} 组`;groupList.innerHTML='<div class="group-done">全部完成，可以关闭了</div>';return}const g=groupsData[groupIndex];groupProgress.textContent=`${groupIndex+1} / ${groupsData.length}`;groupList.innerHTML=`<article class="similarity-group"><div class="group-head"><strong>${g.type==='duplicate'?'近似重复':'连拍'} · ${g.members.length} 张</strong><span>点击你最想保留的一张</span></div><div class="member-grid">${g.members.map(m=>{const name=escapeHTML(m.path.split('/').pop());return `<div class="member-card"><button class="member-choice" data-photo="${m.id}" data-feedback-group="${g.id}" aria-label="选 ${name} 为最佳"><img src="${m.thumbnail||''}" alt="${name}"><span>${name} · 选为最佳</span></button><button class="group-rotate" data-rotate-path="${encodeURIComponent(m.path)}" aria-label="旋转 ${name}">↻ 旋转</button></div>`}).join('')}</div></article>`}

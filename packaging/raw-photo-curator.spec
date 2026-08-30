@@ -24,7 +24,7 @@ app = BUNDLE(
     info_plist={
         "CFBundleDisplayName": "RAW Photo Curator",
         "CFBundleName": "RAW Photo Curator",
-        "CFBundleShortVersionString": "0.2.0",
+        "CFBundleShortVersionString": "0.2.1",
         "NSHighResolutionCapable": True,
         "NSHumanReadableCopyright": "Copyright © 2026 RAW Photo Curator contributors",
     },
