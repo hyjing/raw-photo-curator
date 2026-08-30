@@ -1,0 +1,23 @@
+name: Feature request
+description: Propose a focused workflow or analyzer improvement
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Photography workflow problem
+      description: What job is difficult today, and for which type of photographer?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and privacy considerations
+      description: How could the feature be evaluated, and does it change local-only processing?

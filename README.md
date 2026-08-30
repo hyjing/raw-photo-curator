@@ -2,6 +2,12 @@
 
 [中文](#中文) · [English](#english)
 
+[![Latest release](https://img.shields.io/github/v/release/hyjing/raw-photo-curator?display_name=tag)](https://github.com/hyjing/raw-photo-curator/releases/latest)
+[![CI](https://github.com/hyjing/raw-photo-curator/actions/workflows/ci.yml/badge.svg)](https://github.com/hyjing/raw-photo-curator/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/hyjing/raw-photo-curator)](LICENSE)
+![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple)
+![Local only](https://img.shields.io/badge/privacy-local--only-55c987)
+
 ![RAW Photo Curator Alaska Top 5 演示](docs/assets/demo.gif)
 
 | 动态 Top 5 | 连拍选最佳 | 明确的选片终点 |
@@ -12,9 +18,9 @@
 
 ## 中文
 
-本地优先、可解释的 RAW 选片工具。直接在 Finder 选择 Sony ARW 或普通照片文件夹，获得
-Top 5 推荐；你只需保留或淘汰，轻量的本地排序模型会逐步学习个人偏好。照片、预览、评分
-和反馈都留在你的 Mac 上。
+面向 Sony ARW 和 RAW 工作流的开源离线 AI 选片工具。它根据清晰度、曝光、构图、动态
+范围、主体分离以及你的保留/淘汰反馈筛选照片，不上传图片。直接在 Finder 选择文件夹即可
+获得可解释的 Top 5 推荐；轻量本地排序模型会逐步学习个人偏好。
 
 > 当前为公开 alpha。macOS 下载版不需要安装 Python。
 
@@ -39,6 +45,35 @@ Top 5 推荐；你只需保留或淘汰，轻量的本地排序模型会逐步�
 六边形图解释清晰度、曝光、动态范围、对比、色彩和构图。Travel、Portrait、Landscape、
 Wildlife 和 Custom 是可切换的显式标准。“连拍选最佳”一次只显示一组相关照片，只需点出
 其中最好的一张。
+
+## 适合谁
+
+- 需要批量筛选 Sony ARW 的 Alpha 相机用户；
+- 一次拍摄数百张 RAW 的旅行、婚礼、野生动物和体育摄影师；
+- 希望在连拍和近重复照片中快速找出最佳帧的用户；
+- 不愿把私人照片上传到云端的摄影师；
+- 需要 Lightroom / Capture One XMP sidecar 工作流的用户；
+- 希望选片工具逐步学习个人审美，而不是依赖固定通用分数的用户。
+
+## 为什么不同
+
+| 能力 | RAW Photo Curator | 通用照片管理器 | 云端 AI 选片 |
+| --- | --- | --- | --- |
+| 完全本地、无需上传 | ✓ | 通常支持 | 通常不支持 |
+| Sony ARW 原生流程 | ✓ | 视产品而定 | 视产品而定 |
+| 可解释的客观证据 | ✓ | 较少 | 通常不透明 |
+| 根据 keep/reject 现场学习 | ✓ | 较少 | 视产品而定 |
+| 连拍与近重复组内选择 | ✓ | 部分支持 | 部分支持 |
+| Lightroom / Capture One XMP | ✓ | 部分支持 | 部分支持 |
+| 开源、可审计 | ✓ | 通常不支持 | 通常不支持 |
+
+## 可复现的实测
+
+- 真实测试集：355 张 Sony ARW；
+- 第二次扫描：355 / 355 缓存命中；
+- 隐私边界：照片和反馈只留在本机；
+- 自动化验证：42 项测试；
+- 真实反馈示例：31 条反馈后，本地个性化权重达到受限上限 40%。
 
 ## 技术特点
 
@@ -67,7 +102,7 @@ Wildlife 和 Custom 是可切换的显式标准。“连拍选最佳”一次只
 ```bash
 .venv/bin/pip install -e '.[packaging,vision]'
 ./scripts/build_macos.sh
-./scripts/package_macos_release.sh v0.2.0
+./scripts/package_macos_release.sh v0.2.2
 ```
 
 可选本地模型必须显式下载：`raw-curator install-model face` 和
@@ -105,9 +140,10 @@ raw-curator export reports/live/feedback.sqlite3 selection.json --profile travel
 
 ## English
 
-Local-first, explainable photo culling for Sony ARW and common image formats. Choose a folder in
-Finder, get five recommendations, keep or reject, and let a lightweight on-device ranker learn your
-preferences. Photos, previews, scores, and feedback stay on your Mac.
+An open-source, offline AI photo culling app for Sony ARW and RAW workflows. It ranks photos using
+sharpness, exposure, composition, dynamic range, subject separation, and your personal keep/reject
+feedback—without uploading images. Choose a folder in Finder to get an explainable Top 5, while a
+lightweight on-device ranker gradually learns your preferences.
 
 > Public alpha. The downloadable macOS app does not require Python.
 
@@ -133,6 +169,35 @@ disable Gatekeeper globally. See [release and signing notes](docs/RELEASE.md).
 The hexagonal chart explains sharpness, exposure, dynamic range, contrast, color, and composition.
 Travel, Portrait, Landscape, Wildlife, and Custom profiles provide explicit starting standards.
 Burst review presents one related set at a time and asks only for the best frame.
+
+### Who it is for
+
+- Sony Alpha users culling large ARW shoots;
+- travel, wedding, wildlife, and sports photographers reviewing hundreds of RAW files;
+- photographers choosing the best frame from bursts and near-duplicates;
+- privacy-conscious users who do not want to upload personal photos;
+- Lightroom or Capture One users who need non-destructive XMP sidecars;
+- anyone who wants a culling tool to learn personal taste instead of applying one universal score.
+
+### How it differs
+
+| Capability | RAW Photo Curator | General photo managers | Cloud AI culling |
+| --- | --- | --- | --- |
+| Fully local, no upload | ✓ | Often | Usually no |
+| Sony ARW workflow | ✓ | Product-dependent | Product-dependent |
+| Explainable objective evidence | ✓ | Uncommon | Usually opaque |
+| Learns from keep/reject feedback | ✓ | Uncommon | Product-dependent |
+| Burst and near-duplicate review | ✓ | Partial | Partial |
+| Lightroom / Capture One XMP | ✓ | Partial | Partial |
+| Open source and auditable | ✓ | Usually no | Usually no |
+
+### Reproducible evidence
+
+- real test set: 355 Sony ARW files;
+- second scan: 355 / 355 cache hits;
+- privacy boundary: photos and feedback remain on-device;
+- automated verification: 42 tests;
+- real feedback example: 31 decisions raised local personalization to its bounded 40% influence.
 
 ### Why it is technically interesting
 
@@ -162,7 +227,7 @@ Open `http://127.0.0.1:8765`. To build the macOS app or complete release artifac
 ```bash
 .venv/bin/pip install -e '.[packaging,vision]'
 ./scripts/build_macos.sh
-./scripts/package_macos_release.sh v0.2.0
+./scripts/package_macos_release.sh v0.2.2
 ```
 
 Optional models are explicit, pinned downloads: `raw-curator install-model face` and

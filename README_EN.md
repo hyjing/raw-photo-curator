@@ -8,9 +8,10 @@
 
 [Read the bilingual README rendered on the repository front page](README.md#english)
 
-Local-first, explainable photo culling for Sony ARW and common image formats. Choose a folder in
-Finder, get five recommendations, keep or reject, and let a lightweight on-device ranker learn your
-preferences. Photos, previews, scores, and feedback stay on your Mac.
+An open-source, offline AI photo culling app for Sony ARW and RAW workflows. It ranks photos using
+sharpness, exposure, composition, dynamic range, subject separation, and your personal keep/reject
+feedback—without uploading images. Choose a folder in Finder to get an explainable Top 5, while a
+lightweight on-device ranker gradually learns your preferences.
 
 > Public alpha. The downloadable macOS app does not require Python.
 
@@ -64,7 +65,7 @@ Open `http://127.0.0.1:8765`. To build the macOS app or complete release artifac
 ```bash
 .venv/bin/pip install -e '.[packaging,vision]'
 ./scripts/build_macos.sh
-./scripts/package_macos_release.sh v0.2.0
+./scripts/package_macos_release.sh v0.2.2
 ```
 
 Optional models are explicit, pinned downloads: `raw-curator install-model face` and
