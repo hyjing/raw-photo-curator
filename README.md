@@ -3,8 +3,8 @@
 [中文](#中文) · [English](#english)
 
 [![Latest release](https://img.shields.io/github/v/release/hyjing/raw-photo-curator?display_name=tag)](https://github.com/hyjing/raw-photo-curator/releases/latest)
-[![CI](https://github.com/hyjing/raw-photo-curator/actions/workflows/ci.yml/badge.svg)](https://github.com/hyjing/raw-photo-curator/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/github/license/hyjing/raw-photo-curator)](LICENSE)
+[![CI](https://github.com/hyjing/raw-photo-curator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hyjing/raw-photo-curator/actions/workflows/ci.yml?query=branch%3Amain)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple)
 ![Local only](https://img.shields.io/badge/privacy-local--only-55c987)
 
