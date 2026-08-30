@@ -2,7 +2,9 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+UTC = timezone.utc
 from pathlib import Path
 
 from .criteria import CriterionDefinition, CriterionResult

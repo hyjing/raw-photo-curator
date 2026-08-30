@@ -1,6 +1,8 @@
 import re
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+UTC = timezone.utc
 from io import BytesIO
 from pathlib import Path
 

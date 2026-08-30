@@ -1,4 +1,6 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+UTC = timezone.utc
 from pathlib import Path
 
 from raw_photo_curator.models import Metrics, Result
