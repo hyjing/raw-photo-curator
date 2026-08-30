@@ -17,8 +17,10 @@ preferences. Photos, previews, scores, and feedback stay on your Mac.
 ## Download for macOS
 
 [Download the latest release](https://github.com/hyjing/raw-photo-curator/releases/latest), open the
-DMG, and drag **RAW Photo Curator** to Applications. Until the app is signed and notarized, macOS may
-require Control-click → Open. See [release and signing notes](docs/RELEASE.md).
+DMG, and drag **RAW Photo Curator** to Applications. The current alpha is not Apple-notarized. If
+macOS says it cannot verify the app for malicious software, try opening it once, then go to
+**System Settings → Privacy & Security** and click **Open Anyway** in the Security section. Do not
+disable Gatekeeper globally. See [release and signing notes](docs/RELEASE.md).
 
 ## The workflow
 

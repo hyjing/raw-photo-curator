@@ -19,6 +19,12 @@ starts the loopback-only service, and opens the culling interface in the default
 The script creates a drag-to-Applications DMG, a ZIP, and SHA-256 checksums in `dist/`. If signing
 credentials are absent, the artifacts are intentionally unsigned and the script prints a warning.
 
+For an unsigned alpha, macOS may report that it cannot verify whether the app contains malicious
+software. After verifying the release checksum, try opening the app once, then use
+**System Settings → Privacy & Security → Security → Open Anyway**. This exception applies to this
+app only; do not disable Gatekeeper globally. The terminal equivalent, scoped to the installed app,
+is `xattr -dr com.apple.quarantine /Applications/RAWPhotoCurator.app`.
+
 ## Signing and notarization
 
 Import a **Developer ID Application** certificate, then set:

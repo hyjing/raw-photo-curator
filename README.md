@@ -21,8 +21,10 @@ Top 5 推荐；你只需保留或淘汰，轻量的本地排序模型会逐步�
 ## 下载 macOS 版
 
 [下载最新版本](https://github.com/hyjing/raw-photo-curator/releases/latest)，打开 DMG 后把
-**RAW Photo Curator** 拖入 Applications。正式签名和公证完成前，macOS 可能需要按住
-Control 点击应用并选择“打开”。详情见[发布与签名说明](docs/RELEASE.md)。
+**RAW Photo Curator** 拖入 Applications。当前 alpha 尚未经过 Apple 公证；如果 macOS
+提示“无法验证是否包含恶意软件”，先尝试打开一次，再进入**系统设置 → 隐私与安全**，在
+安全性区域点击**仍要打开**。不要关闭整个 Gatekeeper。详情与校验方法见
+[发布与签名说明](docs/RELEASE.md)。
 
 ## 三步完成选片
 
@@ -112,8 +114,10 @@ preferences. Photos, previews, scores, and feedback stay on your Mac.
 ### Download for macOS
 
 [Download the latest release](https://github.com/hyjing/raw-photo-curator/releases/latest), open the
-DMG, and drag **RAW Photo Curator** to Applications. The current alpha is not notarized, so macOS may
-require Control-click → Open. See [release and signing notes](docs/RELEASE.md).
+DMG, and drag **RAW Photo Curator** to Applications. The current alpha is not Apple-notarized. If
+macOS says it cannot verify the app for malicious software, try opening it once, then go to
+**System Settings → Privacy & Security** and click **Open Anyway** in the Security section. Do not
+disable Gatekeeper globally. See [release and signing notes](docs/RELEASE.md).
 
 ### Three-step workflow
 
