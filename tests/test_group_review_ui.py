@@ -29,3 +29,10 @@ def test_empty_library_renders_a_welcome_screen_before_finder():
     assert "选择照片文件夹" in APP_HTML
     assert "完全本地处理" in APP_HTML
     assert "d.candidates.length?render(d.candidates):renderWelcome()" in APP_HTML
+
+
+def test_finish_panel_contains_visual_and_learning_summary():
+    assert "finish-strip" in APP_HTML
+    assert "保留组优势集中在" in APP_HTML
+    assert "个人偏好已经参与排序" in APP_HTML
+    assert "完成 ${d.completion_percent}%" in APP_HTML

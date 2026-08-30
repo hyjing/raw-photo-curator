@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "raw-photo-curator"
-version = "0.2.1"
+version = "0.2.2"
 description = "Local-first RAW photo culling and editing-potential analyzer"
 readme = "README.md"
 requires-python = ">=3.10"

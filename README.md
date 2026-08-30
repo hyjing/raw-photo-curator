@@ -34,7 +34,7 @@ Top 5 推荐；你只需保留或淘汰，轻量的本地排序模型会逐步�
    自动更新，再进入下一轮。
 3. 随时点击**完成选片**。你可以把保留的原始照片复制到新目录，或生成 Lightroom /
    Capture One 可读取的 XMP sidecar。程序绝不修改 RAW 字节、不覆盖已有文件，每次导出
-   都保存审计记录。
+   都保存审计记录。完成页还会总结保留照片、选片进度、照片优势和个人偏好学习状态。
 
 六边形图解释清晰度、曝光、动态范围、对比、色彩和构图。Travel、Portrait、Landscape、
 Wildlife 和 Custom 是可切换的显式标准。“连拍选最佳”一次只显示一组相关照片，只需点出
@@ -127,7 +127,8 @@ disable Gatekeeper globally. See [release and signing notes](docs/RELEASE.md).
    train the per-profile preference model before the next round.
 3. Click **Finish culling** at any time. Copy kept originals to another folder or generate
    Lightroom/Capture One-compatible XMP sidecars. RAW bytes are never modified, existing files are
-   never overwritten, and every export has an audit record.
+   never overwritten, and every export has an audit record. The finish screen also summarizes the
+   kept photos, review progress, visual strengths, and personalization status.
 
 The hexagonal chart explains sharpness, exposure, dynamic range, contrast, color, and composition.
 Travel, Portrait, Landscape, Wildlife, and Custom profiles provide explicit starting standards.
