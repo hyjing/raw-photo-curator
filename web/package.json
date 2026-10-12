@@ -1,0 +1,1 @@
+{"name":"raw-photo-curator-web","private":true,"type":"module","scripts":{"test":"node --test tests/*.test.js","dev":"python3 -m http.server 8790 --directory dist"}}

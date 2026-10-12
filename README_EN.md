@@ -1,5 +1,11 @@
 # RAW Photo Curator
 
+**[Browser app source & local usage ↗](web/README.md)** — no photo uploads.
+The hosted public URL is pending resolution of the account's GitHub Pages custom domain configuration.
+Web alpha supports embedded Sony ARW previews, JPEG/PNG/WebP, local quality scoring, Top 5,
+rotation, keep/reject feedback learning, and XMP ZIP export. The browser model is separate from
+the desktop model; full RAW decoding, semantic models and burst grouping are not yet included.
+
 ![RAW Photo Curator Top 5](docs/assets/demo.gif)
 
 | Dynamic Top 5 | Best frame in a burst | A clear finish state |

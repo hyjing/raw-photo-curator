@@ -2,6 +2,17 @@
 
 [中文](#中文) · [English](#english)
 
+**Web alpha:** [源码与本地运行 · Source & local usage](web/README.md)
+
+网页版已完成；公开入口待账号 Pages 的自定义域名配置恢复后启用。
+The browser app is ready; the public Pages URL is pending resolution of the account's custom domain configuration.
+
+Web alpha：无需安装，选择本地文件夹即可开始。支持 Sony ARW 内嵌 JPEG 预览和 JPEG/PNG/WebP，
+后台分析、大图 Top 5、旋转、保留/淘汰、自动学习偏好和 XMP ZIP 导出。照片不上传。
+网页版目前使用预览质量指标，与桌面版模型独立；暂不包含完整 RAW 解码、语义模型或连拍分组。
+Browser alpha: local processing, no installation or photo uploads. RAW analysis uses embedded JPEG previews;
+desktop-only semantic models and burst grouping are not yet available. See [Web app details](web/README.md).
+
 [![Latest release](https://img.shields.io/github/v/release/hyjing/raw-photo-curator?display_name=tag)](https://github.com/hyjing/raw-photo-curator/releases/latest)
 [![CI](https://github.com/hyjing/raw-photo-curator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hyjing/raw-photo-curator/actions/workflows/ci.yml?query=branch%3Amain)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

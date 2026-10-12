@@ -1,0 +1,41 @@
+const { chromium } = require('playwright');
+const assert = require('node:assert/strict');
+(async () => {
+ const browser=await chromium.launch({headless:true,channel:'chrome'});
+ try {
+  const page=await browser.newPage({viewport:{width:1400,height:1000}}),errors=[],external=[];
+  page.on('pageerror',e=>errors.push(e.message));
+  page.on('request',r=>{if(!r.url().startsWith('http://127.0.0.1:8790/')&&!r.url().startsWith('blob:'))external.push(r.url());});
+  await page.goto('http://127.0.0.1:8790/');
+  await page.screenshot({path:'/private/tmp/raw-curator-web-start.png'});
+  await page.setInputFiles('#fileInput',process.argv.slice(2));
+  await page.waitForFunction(()=>document.querySelector('#progressPanel').hidden&&document.querySelectorAll('.card').length===5,null,{timeout:60000});
+  assert.equal(await page.locator('.card').count(),5);
+  assert((await page.locator('.meta').first().textContent()).includes('RAW 内嵌预览'));
+  await page.locator('.rotate').first().click();
+  assert((await page.locator('.photo img').first().getAttribute('style')).includes('90deg'));
+  await page.locator('.decisions .keep').first().click();
+  await page.locator('.decisions .reject').nth(1).click();
+  await page.locator('.decisions .keep:not(.active)').first().click();
+  await page.locator('.decisions .reject').nth(2).click();
+  assert((await page.locator('#learning').textContent()).includes('已从 4'));
+  await page.locator('#undo').click();
+  assert((await page.locator('#learning').textContent()).includes('开始学习'));
+  await page.locator('.decisions .reject').nth(2).click();
+  await page.screenshot({path:'/private/tmp/raw-curator-web-top5.png'});
+  await page.locator('#finish').click();
+  assert((await page.locator('#summaryText').textContent()).includes('保留了 2 张'));
+  const downloaded=page.waitForEvent('download');
+  await page.locator('#export').click();
+  await(await downloaded).saveAs('/private/tmp/raw-curator-selection.zip');
+  await page.reload();await page.setInputFiles('#fileInput',process.argv.slice(2));
+  await page.waitForFunction(()=>document.querySelector('#progressPanel').hidden,null,{timeout:60000});
+  assert((await page.locator('#counts').textContent()).includes('2 张保留'));
+  while(await page.locator('.decisions .keep:not(.active)').count())await page.locator('.decisions .keep:not(.active)').first().click();
+  assert.equal(await page.locator('.card').count(),0);assert(await page.locator('#empty').isVisible());
+  await page.setViewportSize({width:390,height:844});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  assert.equal(external.length,0);assert.deepEqual(errors,[]);
+  console.log(JSON.stringify({result:'passed',rawFiles:process.argv.length-2,checks:['RAW preview','Top5','rotation','replacement','feedback learning','undo','summary','ZIP export','reload persistence','round completion','mobile layout','zero external requests']}));
+ }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exitCode=1;});
