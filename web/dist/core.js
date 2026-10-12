@@ -1,0 +1,29 @@
+export const names=['sharpness','exposure','highlights','shadows','contrast','noise','color','white_balance','composition','horizon','edge_integrity'];
+export const labels=['清晰度','曝光','高光保留','阴影保留','对比度','噪声控制','色彩','白平衡','构图代理','地平线代理','边缘完整性'];
+export const base=[.22,.12,.08,.06,.07,.07,.05,.05,.18,.03,.03];
+const clamp=x=>Math.max(0,Math.min(100,x));
+const mean=a=>a.reduce((s,x)=>s+x,0)/a.length;
+const std=a=>{const m=mean(a);return Math.sqrt(mean(a.map(x=>(x-m)**2)));};
+const pct=(a,p)=>a[Math.min(a.length-1,Math.floor((a.length-1)*p))];
+export function measure(data,w,h){
+ const g=[],sat=[],ch=[0,0,0],center=[],border=[];let gx=0,gy=0,hi=0,lo=0;
+ for(let y=0;y<h;y++)for(let x=0;x<w;x++){const i=y*w+x,j=i*4,r=data[j]/255,b=data[j+2]/255,c=data[j+1]/255;g[i]=r*.2126+c*.7152+b*.0722;sat.push(Math.max(r,c,b)-Math.min(r,c,b));ch[0]+=r;ch[1]+=c;ch[2]+=b;hi+=g[i]>.98;lo+=g[i]<.02;if(x>=Math.floor(w/4)&&x<Math.floor(3*w/4)&&y>=Math.floor(h/4)&&y<Math.floor(3*h/4))center.push(g[i]);if(y<Math.floor(h/10)||y>=Math.floor(9*h/10)||x<Math.floor(w/10)||x>=Math.floor(9*w/10))border.push(g[i]);if(x)gx+=Math.abs(g[i]-g[i-1]);if(y)gy+=Math.abs(g[i]-g[i-w]);}
+ const sorted=[...g].sort((a,b)=>a-b),res=[],mag=[],angles=[],edge=[];
+ for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){const i=y*w+x,dx=(g[i+1]-g[i-1])/2,dy=(g[i+w]-g[i-w])/2,m=Math.hypot(dx,dy);res.push(Math.abs(g[i]-(g[i-1]+g[i+1]+g[i-w]+g[i+w])/4));mag.push(m);angles.push(Math.abs(Math.abs(Math.atan2(dy,dx)*180/Math.PI)-90));if(x<w/30||x>w-w/30||y<h/30||y>h-h/30)edge.push(m);}
+ res.sort((a,b)=>a-b);const ms=[...mag].sort((a,b)=>a-b),cut=pct(ms,.92),strong=angles.filter((a,i)=>mag[i]>=cut).sort((a,b)=>a-b),n=g.length,detail=std(center),bd=std(border);
+ const values=[(gx/(h*(w-1))+gy/(w*(h-1)))*850,100-Math.abs(mean(g)-.48)*210,100*(1-hi/n*7),100*(1-lo/n*7),(pct(sorted,.95)-pct(sorted,.05))*125,100-mean(res.slice(0,Math.max(1,Math.floor(res.length*.6))))*900,45+mean(sat)*150+std(sat)*60,100-(Math.max(...ch)-Math.min(...ch))/n*180,58+detail*120-Math.max(0,bd-detail)*80,100-pct(strong,.5)*2.2,100-edge.filter(x=>x>pct(ms,.9)).length/Math.max(1,edge.length)*180];
+ return values.map(x=>Math.round(clamp(Number.isFinite(x)?x:50)*10)/10);
+}
+export function train(feedback){
+ const pos=Object.values(feedback).filter(x=>x.choice==='keep'),neg=Object.values(feedback).filter(x=>x.choice==='reject');if(pos.length<2||neg.length<2)return null;
+ const pairs=[];for(const p of pos)for(const n of neg){if(pairs.length<512)pairs.push(p.metrics.map((x,i)=>(x-n.metrics[i])/100));}
+ const weights=Array(11).fill(0);for(let step=0;step<350;step++){const grad=Array(11).fill(0);for(const x of pairs){const z=x.reduce((s,v,i)=>s+v*weights[i],0),err=1/(1+Math.exp(-Math.max(-20,Math.min(20,z))))-1; x.forEach((v,i)=>grad[i]+=err*v/pairs.length);}const rate=.18/(1+step/100);weights.forEach((v,i)=>weights[i]-=rate*(grad[i]+.35*v));}
+ return {weights,count:pos.length+neg.length};
+}
+export function score(metrics,model){const objective=metrics.reduce((s,x,i)=>s+x*base[i],4);const z=model?metrics.reduce((s,x,i)=>s+x/100*model.weights[i],0):0;return clamp(objective+(model?Math.min(12,model.count*.3)*Math.tanh(z):0));}
+export function reason(m){const notes=[];if(m[0]>=70)notes.push('细节清晰，值得放大查看');if(m[2]>=85&&m[3]>=85)notes.push('预览高光与暗部剪裁较少');if(m[8]>=70)notes.push('画面中央的信息较集中');if(m[1]>=75)notes.push('整体亮度较均衡');return notes.slice(0,2).join('；')||'技术指标较均衡，适合进一步比较';}
+// Sony RAW contains embedded JPEG previews. This does not estimate linear RAW headroom.
+export function extractJpeg(buffer){const a=new Uint8Array(buffer);let best=null;for(let i=0;i<a.length-3;i++){if(a[i]!==255||a[i+1]!==216||a[i+2]!==255)continue;const start=i;for(let j=i+3;j<a.length-1;j++){if(a[j]===255&&a[j+1]===217){const candidate=a.slice(start,j+2);if(!best||candidate.length>best.length)best=candidate;i=j+1;break;}}}if(!best||best.length<1024)throw Error('没有找到可解码的内嵌 JPEG 预览');return best;}
+export function escapeXml(s){return s.replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&apos;'}[c]));}
+export function xmp(name){return `<?xml version="1.0" encoding="UTF-8"?>\n<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmp:Rating="5" xmp:Label="Keep"><dc:description><rdf:Alt><rdf:li xml:lang="x-default">RAW Photo Curator: ${escapeXml(name)}</rdf:li></rdf:Alt></dc:description></rdf:Description></rdf:RDF></x:xmpmeta>`;}
+export function zip(entries){const enc=new TextEncoder(),chunks=[],central=[];let offset=0;function header(n){return new Uint8Array(n);}function crc(a){let c=0xffffffff;for(const b of a){c^=b;for(let k=0;k<8;k++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;}for(const [name,content]of entries){const n=enc.encode(name),d=enc.encode(content),c=crc(d),h=header(30),v=new DataView(h.buffer);v.setUint32(0,0x04034b50,true);v.setUint16(4,20,true);v.setUint16(6,0x800,true);v.setUint32(14,c,true);v.setUint32(18,d.length,true);v.setUint32(22,d.length,true);v.setUint16(26,n.length,true);chunks.push(h,n,d);const z=header(46),q=new DataView(z.buffer);q.setUint32(0,0x02014b50,true);q.setUint16(4,20,true);q.setUint16(6,20,true);q.setUint16(8,0x800,true);q.setUint32(16,c,true);q.setUint32(20,d.length,true);q.setUint32(24,d.length,true);q.setUint16(28,n.length,true);q.setUint32(42,offset,true);central.push(z,n);offset+=h.length+n.length+d.length;}const size=central.reduce((s,a)=>s+a.length,0),end=header(22),e=new DataView(end.buffer);e.setUint32(0,0x06054b50,true);e.setUint16(8,entries.length,true);e.setUint16(10,entries.length,true);e.setUint32(12,size,true);e.setUint32(16,offset,true);return new Blob([...chunks,...central,end],{type:'application/zip'});}

@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 dist/
+!web/dist/
+!web/dist/**
 build/
 *.egg-info/
 reports/
